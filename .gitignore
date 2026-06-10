@@ -1,0 +1,7 @@
+.env
+__pycache__/
+.pytest_cache/
+logs/
+*.log
+positions.json
+notification_state.json
