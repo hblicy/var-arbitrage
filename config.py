@@ -115,6 +115,8 @@ class ThresholdSettings:
     notify_min_spread_bps: float = _env_float("NOTIFY_MIN_SPREAD_BPS", 100.0)
     notify_min_funding_bps: float = _env_float("NOTIFY_MIN_FUNDING_BPS", 50.0)
     notify_min_total_bps: float = _env_float("NOTIFY_MIN_TOTAL_BPS", 100.0)
+    dashboard_max_cover_hours: float = _env_float("DASHBOARD_MAX_COVER_HOURS", 24.0)
+    notify_max_cover_hours: float = _env_float("NOTIFY_MAX_COVER_HOURS", 24.0)
 
     # --- 资金费反转时间阈值 (分钟) ---
     # 只有当资金费率持续不利超过此时间才触发退出警报

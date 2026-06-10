@@ -3,10 +3,10 @@ import logging
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 import sys
 import secrets
 
@@ -21,8 +21,8 @@ from collectors.binance import BinanceCollector
 from analyzer import analyse_markets
 from notifier import WeChatNotifier
 from position_tracker import (
-    load_positions, add_position, remove_position, 
-    get_all_positions, check_exit_signals, estimate_position_pnl,
+    add_position, remove_position,
+    check_exit_signals, estimate_position_pnl, init_tracker,
     update_pre_settlement_rates, accumulate_funding
 )
 
@@ -66,26 +66,79 @@ app = FastAPI(title="Nado-Variational Arbitrage Monitor")
 # Position Management Auth
 # ===========================
 security = HTTPBasic()
-POSITION_USER = os.getenv("POSITION_USER", "admin")
-POSITION_PASS = os.getenv("POSITION_PASS", "admin")
 
-def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
-    """Verify HTTP Basic Auth credentials for position management."""
-    correct_user = secrets.compare_digest(credentials.username, POSITION_USER)
-    correct_pass = secrets.compare_digest(credentials.password, POSITION_PASS)
-    if not (correct_user and correct_pass):
+def _verify_password(plain: str, hashed: str) -> bool:
+    """Verify Basic Auth password against the users table hash."""
+    try:
+        import bcrypt
+        return bcrypt.checkpw(plain.encode(), hashed.encode())
+    except ImportError:
+        return secrets.compare_digest(plain, hashed)
+
+
+def _hash_password(plain: str) -> str:
+    """Hash a password for storing in the users table."""
+    import bcrypt
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+
+
+def _get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
+    from db import get_user_by_username
+    return get_user_by_username(username)
+
+
+def get_current_user(credentials: HTTPBasicCredentials = Depends(security)) -> Dict[str, Any]:
+    """Verify HTTP Basic Auth credentials against SQLite users."""
+    user = _get_user_by_username(credentials.username)
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
             headers={"WWW-Authenticate": "Basic"},
         )
-    return credentials.username
+    if not user.get("enabled", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account disabled",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    if not _verify_password(credentials.password, user["password_hash"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return {k: v for k, v in user.items() if k != "password_hash"}
+
+
+def require_admin(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    """Require admin role for user management APIs."""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return current_user
 
 # Use startup events as they are sometimes more reliable with Uvicorn on Windows
 @app.on_event("startup")
 async def startup_event():
     logger.info("Application Startup. Initializing collectors...")
     global collectors_hub, notifier
+    try:
+        from db import create_user, get_all_users, init_db
+        init_db()
+        if not get_all_users(include_disabled=True):
+            create_user(
+                username=os.getenv("POSITION_USER", "admin"),
+                password_hash=_hash_password(os.getenv("POSITION_PASS", "admin")),
+                display_name="Administrator",
+                role="admin",
+                enabled=True,
+            )
+            logger.info("Default admin user created: %s", os.getenv("POSITION_USER", "admin"))
+        init_tracker()
+        logger.info("Position database initialized.")
+    except Exception as e:
+        logger.error(f"Error initializing position database: {e}")
+
     try:
         from collectors.factory import create_collector
         for key, cfg in settings.exchanges.items():
@@ -315,11 +368,21 @@ async def update_data_loop():
             min_spread = settings.thresholds.notify_min_spread_bps
             min_funding = settings.thresholds.notify_min_funding_bps
             min_total = settings.thresholds.notify_min_total_bps
+            max_cover_hours = settings.thresholds.notify_max_cover_hours
             
             for opp in opportunities:
                 spread_val = opp.net_spread_bps
                 funding_val = opp.details.get("funding_diff_scaled_bps", 0)
-                total_val = opp.details.get("total_net_bps", 0)
+                base_interval = opp.details.get("base_interval", 8)
+                funding_daily_val = opp.details.get(
+                    "funding_daily_bps",
+                    funding_val * (24 / base_interval) if base_interval > 0 else 0,
+                )
+                projected_24h_val = opp.details.get(
+                    "projected_24h_bps",
+                    spread_val + funding_daily_val,
+                )
+                cover_hours = opp.details.get("cover_hours")
                 
                 # Settlement direction filter:
                 # Block unfavorable direction where long side settles LESS frequently
@@ -337,10 +400,20 @@ async def update_data_loop():
                     # Unfavorable: long side settles less frequently than short side
                     continue
                 
-                # Must meet all three minimum thresholds to trigger notification
-                if (spread_val >= min_spread and 
-                    funding_val >= min_funding and 
-                    total_val >= min_total):
+                aligned_opportunity = (
+                    spread_val >= min_spread
+                    and funding_daily_val >= min_funding
+                    and projected_24h_val >= min_total
+                )
+                funding_cover_opportunity = (
+                    spread_val < 0
+                    and cover_hours is not None
+                    and cover_hours <= max_cover_hours
+                    and funding_daily_val >= min_funding
+                    and projected_24h_val >= min_total
+                )
+
+                if aligned_opportunity or funding_cover_opportunity:
                     strict_opps.append(opp)
             
             if strict_opps:
@@ -415,8 +488,126 @@ async def toggle_exchange(item: ExchangeToggle):
     return {"status": "success", "name": item.name, "enabled": item.enabled, "note": "Preferences are now stored locally in your browser."}
 
 # ===========================
-# Position Management APIs (Auth Required)
+# User / Position Management APIs (Auth Required)
 # ===========================
+
+class UserCreate(BaseModel):
+    username: str = Field(..., min_length=2, max_length=32, pattern=r"^[a-zA-Z0-9_\-]+$")
+    password: str = Field(..., min_length=6, max_length=128)
+    display_name: str = Field(default="", max_length=64)
+    role: str = Field(default="trader")
+    wecom_webhook: str = Field(default="", max_length=512)
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_role(self):
+        if self.role not in ("admin", "trader"):
+            raise ValueError("role must be admin or trader")
+        return self
+
+
+class UserUpdate(BaseModel):
+    display_name: Optional[str] = Field(default=None, max_length=64)
+    wecom_webhook: Optional[str] = Field(default=None, max_length=512)
+    role: Optional[str] = None
+    enabled: Optional[bool] = None
+    password: Optional[str] = Field(default=None, min_length=6, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_role(self):
+        if self.role is not None and self.role not in ("admin", "trader"):
+            raise ValueError("role must be admin or trader")
+        return self
+
+
+@app.get("/api/me")
+async def get_me(current_user: Dict = Depends(get_current_user)):
+    """Return current authenticated user info."""
+    return current_user
+
+
+@app.get("/api/users")
+async def list_users(_: Dict = Depends(require_admin)):
+    """List users (admin only)."""
+    from db import get_all_users
+    return get_all_users(include_disabled=True)
+
+
+@app.post("/api/users")
+async def create_user_endpoint(user: UserCreate, _: Dict = Depends(require_admin)):
+    """Create user (admin only)."""
+    from db import create_user
+    try:
+        result = create_user(
+            username=user.username,
+            password_hash=_hash_password(user.password),
+            display_name=user.display_name,
+            role=user.role,
+            wecom_webhook=user.wecom_webhook,
+            enabled=user.enabled,
+        )
+        logger.info("Admin created user: %s", user.username)
+        return {"status": "success", "user": result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/api/users/{user_id}")
+async def update_user_endpoint(user_id: str, update: UserUpdate, _: Dict = Depends(require_admin)):
+    """Update user (admin only)."""
+    from db import get_all_users, get_user_by_id, update_user
+    target = get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    fields = {}
+    if update.display_name is not None:
+        fields["display_name"] = update.display_name
+    if update.wecom_webhook is not None:
+        fields["wecom_webhook"] = update.wecom_webhook
+    if update.role is not None:
+        fields["role"] = update.role
+    if update.enabled is not None:
+        fields["enabled"] = update.enabled
+    if update.password:
+        fields["password_hash"] = _hash_password(update.password)
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    would_remove_admin = (
+        target.get("role") == "admin"
+        and (
+            fields.get("role", target.get("role")) != "admin"
+            or fields.get("enabled", bool(target.get("enabled"))) is False
+        )
+    )
+    if would_remove_admin:
+        enabled_admins = [
+            user for user in get_all_users(include_disabled=True)
+            if user.get("role") == "admin" and user.get("enabled") and user.get("id") != user_id
+        ]
+        if not enabled_admins:
+            raise HTTPException(status_code=400, detail="Cannot disable or demote the last enabled admin")
+
+    if not update_user(user_id, **fields):
+        raise HTTPException(status_code=404, detail="User not found")
+    logger.info("Admin updated user: %s", user_id)
+    return {"status": "success"}
+
+
+@app.delete("/api/users/{user_id}")
+async def delete_user_endpoint(user_id: str, _: Dict = Depends(require_admin)):
+    """Delete user and their positions (admin only)."""
+    from db import delete_user, get_user_by_id
+    user = get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user["role"] == "admin":
+        raise HTTPException(status_code=400, detail="Cannot delete admin user")
+    delete_user(user_id)
+    logger.info("Admin deleted user: %s", user_id)
+    return {"status": "success"}
+
 
 class PositionCreate(BaseModel):
     symbol: str
@@ -429,30 +620,53 @@ class PositionCreate(BaseModel):
     entry_price_short: float = 0
 
 @app.get("/api/positions")
-async def get_positions(username: str = Depends(verify_credentials)):
-    """Get all tracked positions (requires auth)."""
-    return get_all_positions()
+async def get_positions(
+    current_user: Dict = Depends(get_current_user),
+    all_users: bool = Query(False, description="Admin: view all users' positions"),
+    owner: Optional[str] = Query(None, description="Filter by owner_id"),
+    status_filter: Optional[str] = Query(None, description="open/closed/all"),
+):
+    """Get positions. Traders see only their own; admins can see all."""
+    from db import get_positions as db_get_positions
+
+    if status_filter == "all":
+        db_status = None
+    elif status_filter == "closed":
+        db_status = "closed"
+    else:
+        db_status = "open"
+
+    if current_user["role"] == "admin" and all_users and owner:
+        return db_get_positions(owner_id=owner, status=db_status)
+    if current_user["role"] == "admin" and all_users:
+        return db_get_positions(status=db_status)
+    if owner and owner != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Cannot view other users' positions")
+    return db_get_positions(owner_id=current_user["id"], status=db_status)
 
 @app.post("/api/positions")
-async def create_position(pos: PositionCreate, username: str = Depends(verify_credentials)):
-    """Add a new position to track (requires auth)."""
+async def create_position(pos: PositionCreate, current_user: Dict = Depends(get_current_user)):
+    """Add a new position tagged with the current user."""
     
     # Auto-fill entry funding rates: 单边独立判断，缺哪边补哪边
     exchanges_data = latest_data.get("raw_exchanges_data", {})
+
+    entry_funding_long = pos.entry_funding_long
+    entry_funding_short = pos.entry_funding_short
     
-    if pos.entry_funding_long == 0:
+    if entry_funding_long == 0:
         long_ex_data = exchanges_data.get(pos.long_exchange.lower(), {})
         long_market = long_ex_data.get(pos.symbol.upper())
         if long_market and long_market.funding_rate is not None:
             hours = getattr(long_market, 'native_interval_hours', 8)
-            pos.entry_funding_long = long_market.funding_rate * (8 / hours) if hours > 0 else long_market.funding_rate
+            entry_funding_long = long_market.funding_rate * (8 / hours) if hours > 0 else long_market.funding_rate
             
-    if pos.entry_funding_short == 0:
+    if entry_funding_short == 0:
         short_ex_data = exchanges_data.get(pos.short_exchange.lower(), {})
         short_market = short_ex_data.get(pos.symbol.upper())
         if short_market and short_market.funding_rate is not None:
             hours = getattr(short_market, 'native_interval_hours', 8)
-            pos.entry_funding_short = short_market.funding_rate * (8 / hours) if hours > 0 else short_market.funding_rate
+            entry_funding_short = short_market.funding_rate * (8 / hours) if hours > 0 else short_market.funding_rate
 
     direction = f"{pos.long_exchange.lower()}_long_{pos.short_exchange.lower()}_short"
     position = add_position(
@@ -460,33 +674,53 @@ async def create_position(pos: PositionCreate, username: str = Depends(verify_cr
         direction=direction,
         long_exchange=pos.long_exchange,
         short_exchange=pos.short_exchange,
-        entry_funding_long=pos.entry_funding_long,
-        entry_funding_short=pos.entry_funding_short,
+        entry_funding_long=entry_funding_long,
+        entry_funding_short=entry_funding_short,
         entry_qty=pos.entry_qty,
         entry_price_long=pos.entry_price_long,
         entry_price_short=pos.entry_price_short,
+        owner_id=current_user["id"],
     )
-    logger.info(f"User {username} added position: {pos.symbol} (qty={pos.entry_qty}, long_p={pos.entry_price_long}, short_p={pos.entry_price_short})")
+    logger.info("User %s added position: %s", current_user["username"], pos.symbol)
     return {"status": "success", "position": position}
 
 @app.delete("/api/positions/{position_id}")
-async def delete_position(position_id: str, username: str = Depends(verify_credentials)):
-    """Remove a position (requires auth)."""
-    removed = remove_position(position_id)
-    if removed:
-        logger.info(f"User {username} removed position: {position_id}")
-        return {"status": "success", "position_id": position_id}
-    raise HTTPException(status_code=404, detail=f"Position {position_id} not found")
+async def delete_position(position_id: str, current_user: Dict = Depends(get_current_user)):
+    """Remove a position. Traders can only delete their own."""
+    from db import get_position_by_id
+    pos = get_position_by_id(position_id)
+    if not pos:
+        raise HTTPException(status_code=404, detail=f"Position {position_id} not found")
+    if current_user["role"] != "admin" and pos.get("owner_id") != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Cannot delete another user's position")
+    remove_position(position_id)
+    logger.info("User %s removed position: %s", current_user["username"], position_id)
+    return {"status": "success", "position_id": position_id}
 
 
 @app.get("/api/positions/pnl")
-async def get_positions_with_pnl(username: str = Depends(verify_credentials)):
-    """Get all positions with computed PnL data (requires auth)."""
-    positions = get_all_positions()
+async def get_positions_with_pnl(
+    current_user: Dict = Depends(get_current_user),
+    all_users: bool = Query(False),
+    owner: Optional[str] = Query(None),
+):
+    """Get positions with computed PnL. Traders see own; admins can see all."""
+    from db import get_positions as db_get_positions
+
+    if current_user["role"] == "admin" and all_users and owner:
+        positions_list = db_get_positions(owner_id=owner, status="open")
+    elif current_user["role"] == "admin" and all_users:
+        positions_list = db_get_positions(status="open")
+    elif owner and owner != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Cannot view other users' positions")
+    else:
+        positions_list = db_get_positions(owner_id=current_user["id"], status="open")
+
     exchanges_data = latest_data.get("raw_exchanges_data", {})
     result = {}
 
-    for p_id, pos in positions.items():
+    for pos in positions_list:
+        p_id = pos.get("id", "")
         long_ex = pos.get("long_exchange", "").lower()
         short_ex = pos.get("short_exchange", "").lower()
         symbol = pos.get("symbol", "").upper()
@@ -553,6 +787,46 @@ async def get_positions_with_pnl(username: str = Depends(verify_credentials)):
         result[p_id] = enriched
 
     return result
+
+
+@app.get("/api/positions/reversals")
+async def get_reversals(
+    current_user: Dict = Depends(get_current_user),
+    all_users: bool = Query(False),
+    owner: Optional[str] = Query(None),
+):
+    """Get positions currently in reversal/watch state."""
+    from db import get_positions as db_get_positions
+
+    if current_user["role"] == "admin" and all_users and owner:
+        positions_list = db_get_positions(owner_id=owner, status="open")
+    elif current_user["role"] == "admin" and all_users:
+        positions_list = db_get_positions(status="open")
+    elif owner and owner != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Cannot view other users' reversals")
+    else:
+        positions_list = db_get_positions(owner_id=current_user["id"], status="open")
+
+    reversals = []
+    for pos in positions_list:
+        health = pos.get("health_status", "healthy")
+        if health in ("reversal", "watch"):
+            reversals.append({
+                "id": pos.get("id"),
+                "symbol": pos.get("symbol"),
+                "direction": pos.get("direction"),
+                "long_exchange": pos.get("long_exchange"),
+                "short_exchange": pos.get("short_exchange"),
+                "owner_id": pos.get("owner_id"),
+                "health_status": health,
+                "reversal_reason": pos.get("reversal_reason"),
+                "last_signal_at": pos.get("last_signal_at"),
+                "current_funding_long": pos.get("current_funding_long"),
+                "current_funding_short": pos.get("current_funding_short"),
+                "current_price_long": pos.get("current_price_long"),
+                "current_price_short": pos.get("current_price_short"),
+            })
+    return reversals
 
 # Serve Frontend Static Files
 from fastapi.staticfiles import StaticFiles

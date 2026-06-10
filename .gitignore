@@ -5,3 +5,5 @@ logs/
 *.log
 positions.json
 notification_state.json
+data/*.db
+data/*.db-*

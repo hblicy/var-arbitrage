@@ -415,6 +415,122 @@ class TestAnalyzerExecutableSpread(unittest.TestCase):
         self.assertEqual(target.details["fallback_slippage_bps"], 10.0)
         self.assertAlmostEqual(target.gross_spread_bps, expected_executable, places=6)
 
+    def test_negative_spread_can_show_when_funding_covers_it(self):
+        cfg = self.AnalyzerConfig()
+        markets = {
+            "buyex": {
+                "HUSDT": MarketDatum(
+                    symbol="HUSDT",
+                    price=0.09,
+                    funding_rate=-0.02,
+                    volume_24h=1_000_000,
+                    exchange="buyex",
+                    native_interval_hours=1,
+                    best_bid=0.089,
+                    best_ask=0.09,
+                )
+            },
+            "sellex": {
+                "HUSDT": MarketDatum(
+                    symbol="HUSDT",
+                    price=0.07,
+                    funding_rate=-0.0004,
+                    volume_24h=1_000_000,
+                    exchange="sellex",
+                    native_interval_hours=1,
+                    best_bid=0.07,
+                    best_ask=0.071,
+                )
+            },
+        }
+
+        opps, _, _ = analyse_markets(["HUSDT"], markets, cfg)
+        target = next(o for o in opps if o.direction == "buyex_long_sellex_short")
+
+        self.assertLess(target.net_spread_bps, -100)
+        self.assertEqual(target.details["opportunity_type"], "funding_cover")
+        self.assertAlmostEqual(target.details["funding_hourly_bps"], 196.0, places=6)
+        expected_cover = target.details["price_cost_bps"] / target.details["funding_hourly_bps"]
+        self.assertAlmostEqual(target.details["cover_hours"], expected_cover, places=6)
+
+    def test_dashboard_thresholds_do_not_hide_calculable_pairs(self):
+        class StrictConfig:
+            class thresholds:
+                dashboard_min_spread_bps = 9999
+                dashboard_min_funding_bps = 9999
+                dashboard_min_total_bps = 9999
+                dashboard_max_cover_hours = 0
+                max_price_deviation_pct = 100
+                min_volume_usd = 0
+
+            class fees:
+                slippage_bps = 0.0
+
+            class Ex:
+                taker_bps = 0.0
+
+            exchanges = {"buyex": Ex(), "sellex": Ex()}
+
+        markets = {
+            "buyex": {
+                "BTCUSDT": MarketDatum(
+                    symbol="BTCUSDT",
+                    price=100.0,
+                    funding_rate=0.0,
+                    volume_24h=1_000_000,
+                    exchange="buyex",
+                )
+            },
+            "sellex": {
+                "BTCUSDT": MarketDatum(
+                    symbol="BTCUSDT",
+                    price=100.1,
+                    funding_rate=0.0,
+                    volume_24h=1_000_000,
+                    exchange="sellex",
+                )
+            },
+        }
+
+        opps, reasons, _ = analyse_markets(["BTCUSDT"], markets, StrictConfig())
+
+        self.assertEqual(len(opps), 2)
+        self.assertNotEqual(reasons.get("BTCUSDT"), "NO_OPPORTUNITY")
+        target = next(o for o in opps if o.direction == "buyex_long_sellex_short")
+        self.assertFalse(target.details["meets_dashboard_threshold"])
+
+    def test_notification_shows_cover_time(self):
+        opp = ArbitrageOpportunity(
+            symbol="HUSDT",
+            direction="buyex_long_sellex_short",
+            entry_exchange="buyex",
+            exit_exchange="sellex",
+            gross_spread_bps=-2222.22,
+            net_spread_bps=-2232.22,
+            funding_diff=0.0196,
+            recommendation="OPEN",
+            details={
+                "buy_exchange": "buyex",
+                "sell_exchange": "sellex",
+                "buy_price": 0.09,
+                "sell_price": 0.07,
+                "funding_long_native": -0.02,
+                "funding_short_native": -0.0004,
+                "funding_daily_bps": 4704.0,
+                "funding_hourly_bps": 196.0,
+                "projected_24h_bps": 2471.78,
+                "cover_hours": 11.4,
+                "opportunity_type": "funding_cover",
+                "native_intervals": {"buy": 1, "sell": 1},
+            },
+        )
+
+        content = _format_text([opp])
+
+        self.assertIn("资金费覆盖价差", content)
+        self.assertIn("覆盖时间：约 11.4 小时", content)
+        self.assertIn("24h估算：+24.7178%", content)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

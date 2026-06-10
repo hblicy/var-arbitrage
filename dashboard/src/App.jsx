@@ -38,21 +38,58 @@ const formatLastUpdate = (value) => {
   return value.replace(' (Multi-Exchange Mode)', '');
 };
 
-const calcDailyYieldPercent = (opportunity) => (
-  (opportunity.details.net_spread_bps +
-    (opportunity.details.funding_diff_scaled_bps * 24 / (opportunity.base_interval || 8))) / 100
+const num = (value, fallback = 0) => (
+  Number.isFinite(Number(value)) ? Number(value) : fallback
+);
+
+const getBaseInterval = (opportunity) => (
+  num(opportunity.details.base_interval, num(opportunity.base_interval, 8)) || 8
+);
+
+const calcFundingDailyBps = (opportunity) => {
+  const baseInterval = getBaseInterval(opportunity);
+  return num(
+    opportunity.details.funding_daily_bps,
+    num(opportunity.details.funding_diff_24h_bps,
+      num(opportunity.details.funding_diff_scaled_bps) * 24 / baseInterval),
+  );
+};
+
+const calcProjected24hPercent = (opportunity) => (
+  num(
+    opportunity.details.projected_24h_bps,
+    num(opportunity.details.net_spread_bps) + calcFundingDailyBps(opportunity),
+  ) / 100
 );
 
 const getOpportunityApr = (opportunity) => (
   opportunity.total_apr ?? (
-    opportunity.details.funding_diff_scaled_bps * (24 / (opportunity.base_interval || 8)) * 3.65 +
+    calcFundingDailyBps(opportunity) * 3.65 +
     opportunity.details.net_spread_bps / 100.0
   )
 );
 
+const formatSignedBps = (value) => `${num(value) >= 0 ? '+' : ''}${num(value).toFixed(0)}`;
+const formatSignedPercent = (value, digits = 2) => `${num(value) >= 0 ? '+' : ''}${num(value).toFixed(digits)}%`;
+
+const formatCoverTime = (coverHours, spreadBps) => {
+  if (num(spreadBps) >= 0) return 'No cover';
+  if (!Number.isFinite(Number(coverHours))) return 'No cover';
+  const hours = Number(coverHours);
+  if (hours < 1) return `${Math.round(hours * 60)}m`;
+  return `${hours.toFixed(1)}h`;
+};
+
+const opportunityTypeLabel = (type) => ({
+  aligned: 'Aligned',
+  funding_cover: 'Funding cover',
+  price_only: 'Price only',
+  watch: 'Watch',
+}[type] || 'Watch');
+
 const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity }) {
   if (!opportunity) {
-    return <div className="no-arb-hint">Insufficient Spread</div>;
+    return <div className="no-arb-hint">No valid pair</div>;
   }
 
   const buyEx = opportunity.details.buy_exchange;
@@ -61,37 +98,51 @@ const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity }) {
   const buyInterval = intervals.buy || 8;
   const sellInterval = intervals.sell || 8;
   const hasMismatch = buyInterval !== sellInterval;
-  const dailyYieldPercent = calcDailyYieldPercent(opportunity);
-  const totalBps = opportunity.details.net_spread_bps + opportunity.details.funding_diff_scaled_bps;
+  const projected24hPercent = calcProjected24hPercent(opportunity);
+  const priceBps = num(opportunity.details.net_spread_bps);
+  const fundingDailyBps = calcFundingDailyBps(opportunity);
+  const fundingHourlyBps = num(opportunity.details.funding_hourly_bps, fundingDailyBps / 24);
+  const coverHours = opportunity.details.cover_hours;
+  const setupType = opportunity.details.opportunity_type || 'watch';
   const buyVolume = opportunity.details.volumes.buy;
   const sellVolume = opportunity.details.volumes.sell;
-  const formatVolume = (volume) => volume > 1000000
-    ? `${(volume / 1000000).toFixed(1)}M`
-    : `${(volume / 1000).toFixed(0)}K`;
+  const formatVolume = (volume) => !Number.isFinite(Number(volume))
+    ? '-'
+    : Number(volume) > 1000000
+      ? `${(Number(volume) / 1000000).toFixed(1)}M`
+      : `${(Number(volume) / 1000).toFixed(0)}K`;
 
   return (
     <div className="arb-container">
       <div className="arb-action">
         <span className="exchange-pill buy">
-          <span style={{ opacity: 0.7 }}>Buy</span> {formatExchangeName(buyEx)}
+          <span style={{ opacity: 0.7 }}>Long</span> {formatExchangeName(buyEx)}
         </span>
         <span className="arb-arrow">-&gt;</span>
         <span className="exchange-pill sell">
-          <span style={{ opacity: 0.7 }}>Sell</span> {formatExchangeName(sellEx)}
+          <span style={{ opacity: 0.7 }}>Short</span> {formatExchangeName(sellEx)}
         </span>
       </div>
       <div className="arb-details">
+        <div className={`setup-badge ${setupType}`}>{opportunityTypeLabel(setupType)}</div>
         <div className="arb-total-yield">
-          {dailyYieldPercent.toFixed(2)}%
-          <small>&nbsp; ({totalBps.toFixed(1)} bps)</small>
+          {formatSignedPercent(projected24hPercent)}
+          <small>&nbsp; 24h est</small>
+        </div>
+        <div className="arb-metrics">
+          <span className={priceBps >= 0 ? 'metric-good' : 'metric-bad'}>
+            Price {formatSignedBps(priceBps)}
+          </span>
+          <span className={fundingDailyBps >= 0 ? 'metric-good' : 'metric-bad'}>
+            Funding {formatSignedPercent(fundingDailyBps / 100)}/d
+          </span>
+          <span className={priceBps < 0 ? 'metric-warn' : 'metric-muted'}>
+            Cover {formatCoverTime(coverHours, priceBps)}
+          </span>
         </div>
         <div className="arb-breakdown">
-          <span>Spread: {opportunity.details.net_spread_bps.toFixed(0)}</span>
-          <span>+</span>
-          <span>Fund: {opportunity.details.funding_diff_scaled_bps.toFixed(0)}</span>
-        </div>
-        <div className="arb-volumes" style={{ fontSize: '10px', opacity: 0.6, marginTop: '2px' }}>
-          Vol: {formatVolume(buyVolume)} | {formatVolume(sellVolume)}
+          <span>{formatSignedBps(fundingHourlyBps)} bps/h</span>
+          <span>Vol {formatVolume(buyVolume)} | {formatVolume(sellVolume)}</span>
         </div>
         {(hasMismatch || opportunity.details.suggest_limit_order) && (
           <div className="arb-badges">
@@ -152,7 +203,7 @@ const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, sym
       })}
       <td className="gap-cell">
         <div className="gap-value">
-          <span className={`apr-yield ${dailyYield > 2 ? 'glow' : ''}`}>{dailyYield.toFixed(2)}% <small>Daily</small></span>
+          <span className={`apr-yield ${dailyYield > 2 ? 'glow' : ''}`}>{dailyYield.toFixed(2)}% <small>/day</small></span>
           <span className="bps-value">{delta.toFixed(1)} bps / {baseInterval}h</span>
         </div>
       </td>
@@ -329,7 +380,7 @@ function App() {
 
       const delta = rateCount > 1 ? (maxRate - minRate) * 10000 : 0;
       const dailyYield = delta * (24 / baseInterval) / 100;
-      const bestDailyYieldPercent = bestSymbolOpp ? calcDailyYieldPercent(bestSymbolOpp) : dailyYield;
+      const bestDailyYieldPercent = bestSymbolOpp ? calcProjected24hPercent(bestSymbolOpp) : dailyYield;
       const bestDailyYieldBps = bestSymbolOpp ? bestDailyYieldPercent * 100 : null;
 
       return { sym, delta, bestSymbolOpp, baseInterval, dailyYield, bestDailyYieldPercent, bestDailyYieldBps };
@@ -397,11 +448,11 @@ function App() {
           <div className="stat-value">{totalMarkets}</div>
         </div>
         <div className="stats-card">
-          <div className="stat-label">Live Opportunities</div>
+          <div className="stat-label">Routes Shown</div>
           <div className="stat-value highlight">{oppCount}</div>
         </div>
         <div className="stats-card">
-          <div className="stat-label">Best Daily Yield</div>
+          <div className="stat-label">Best 24h Edge</div>
           <div className="stat-value highlight-green">
             {sortedSymbols.length > 0
               ? sortedSymbols[0].bestSymbolOpp
@@ -414,7 +465,7 @@ function App() {
           <div className="stat-sub">
             {sortedSymbols.length > 0
               ? sortedSymbols[0].bestSymbolOpp
-                ? `${sortedSymbols[0].sym} (Daily: ${sortedSymbols[0].bestDailyYieldBps.toFixed(1)} bps)`
+                ? `${sortedSymbols[0].sym} (24h est: ${sortedSymbols[0].bestDailyYieldBps.toFixed(1)} bps)`
                 : sortedSymbols[0].dailyYield > 0
                   ? `${sortedSymbols[0].sym} (Funding Only)`
                   : 'No opportunities'
@@ -429,7 +480,7 @@ function App() {
             <tr>
               <th className="col-asset">Asset</th>
               {exchanges.map(ex => <th key={ex}>{formatExchangeName(ex)}</th>)}
-              <th className="col-gap">Funding Daily</th>
+              <th className="col-gap">Funding Edge</th>
               <th className="col-action">Arbitrage</th>
             </tr>
           </thead>

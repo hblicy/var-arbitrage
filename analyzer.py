@@ -196,19 +196,28 @@ def _evaluate_direction(
 
     # Normalize funding to 24h for consistent threshold comparison
     funding_bps_24h = funding_bps * (24 / base_interval) if base_interval > 0 else 0
+    funding_hourly_bps = funding_bps / base_interval if base_interval > 0 else 0
+    price_cost_bps = max(0.0, -net_spread_bps)
+    price_edge_bps = max(0.0, net_spread_bps)
+    cover_hours = None
+    if price_cost_bps > 0 and funding_hourly_bps > 0:
+        cover_hours = price_cost_bps / funding_hourly_bps
+    projected_24h_bps = net_spread_bps + funding_bps_24h
+    dashboard_max_cover_hours = getattr(cfg.thresholds, "dashboard_max_cover_hours", 24.0)
 
-    # Decision Criteria: Trigger for dashboard if meets ANY of the following from config
+    # Keep threshold result as metadata only. The dashboard shows every
+    # calculable pair so weak or negative setups can still be compared.
     cond1 = net_spread_bps >= cfg.thresholds.dashboard_min_spread_bps
     cond2 = funding_bps >= cfg.thresholds.dashboard_min_funding_bps
     cond3 = total_net_bps >= cfg.thresholds.dashboard_min_total_bps
-    
-    is_triggered = cond1 or cond2 or cond3
-    
-    if not is_triggered or total_net_bps < -50:
-        return None
-        
-    if net_spread_bps < -100: # Allow up to 1% price loss if funding compensates
-        return None
+    cover_cond = (
+        cover_hours is not None
+        and cover_hours <= dashboard_max_cover_hours
+        and funding_bps_24h >= cfg.thresholds.dashboard_min_funding_bps
+        and projected_24h_bps >= cfg.thresholds.dashboard_min_total_bps
+    )
+
+    meets_dashboard_threshold = cond1 or cond2 or cond3 or cover_cond
 
     recommendation = _build_recommendation(
         direction,
@@ -238,6 +247,9 @@ def _evaluate_direction(
         "gross_spread_bps": gross_bps,
         "net_spread_bps": net_spread_bps,
         "total_net_bps": total_net_bps,
+        "price_edge_bps": price_edge_bps,
+        "price_cost_bps": price_cost_bps,
+        "price_spread_pct": net_spread_bps / 100,
         "fees_bps": fee_penalty,
         "slippage_bps": total_slippage_bps,
         "fallback_slippage_bps": fallback_slippage_bps,
@@ -256,6 +268,12 @@ def _evaluate_direction(
         "funding_short_scaled_bps": (sell_scaled * 10000) if sell_scaled is not None else None,
         "funding_diff_scaled_bps": funding_bps,
         "funding_diff_24h_bps": funding_bps_24h,
+        "funding_hourly_bps": funding_hourly_bps,
+        "funding_daily_bps": funding_bps_24h,
+        "cover_hours": cover_hours,
+        "projected_24h_bps": projected_24h_bps,
+        "opportunity_type": _classify_opportunity(net_spread_bps, funding_hourly_bps, cover_hours),
+        "meets_dashboard_threshold": meets_dashboard_threshold,
         "native_intervals": {
             "buy": buy.native_interval_hours,
             "sell": sell.native_interval_hours,
@@ -282,6 +300,20 @@ def _evaluate_direction(
 
 def _spread_ratio(sell_price: float, buy_price: float) -> float:
     return sell_price / buy_price
+
+
+def _classify_opportunity(
+    net_spread_bps: float,
+    funding_hourly_bps: float,
+    cover_hours: float | None,
+) -> str:
+    if net_spread_bps >= 0 and funding_hourly_bps > 0:
+        return "aligned"
+    if net_spread_bps < 0 and cover_hours is not None:
+        return "funding_cover"
+    if net_spread_bps >= 0:
+        return "price_only"
+    return "watch"
 
 
 def _has_valid_book(market: MarketDatum) -> bool:

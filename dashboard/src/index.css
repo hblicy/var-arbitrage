@@ -741,12 +741,12 @@ tbody tr:hover {
 }
 
 .col-gap {
-  width: 140px;
+  width: 150px;
   text-align: center;
 }
 
 .col-action {
-  width: 200px;
+  width: 290px;
   text-align: center;
 }
 
@@ -915,7 +915,8 @@ tbody tr:hover {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  min-width: 250px;
 }
 
 .arb-badges {
@@ -930,6 +931,7 @@ tbody tr:hover {
   align-items: center;
   font-size: 0.75rem;
   margin-top: 2px;
+  width: 100%;
 }
 
 .arb-apr {
@@ -941,7 +943,7 @@ tbody tr:hover {
 .arb-total-yield {
   color: var(--success-green);
   font-weight: 700;
-  font-size: 1.05rem;
+  font-size: 1rem;
   font-family: var(--font-mono);
   margin-bottom: 2px;
 }
@@ -956,11 +958,78 @@ tbody tr:hover {
 
 .arb-breakdown {
   color: var(--text-muted);
-  font-size: 0.85rem;
+  font-size: 0.72rem;
   margin-top: 2px;
   display: flex;
-  gap: 4px;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
   opacity: 0.95;
+}
+
+.setup-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  white-space: nowrap;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  color: var(--text-secondary);
+}
+
+.setup-badge.aligned {
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.35);
+  color: var(--success-green);
+}
+
+.setup-badge.funding_cover {
+  background: rgba(234, 179, 8, 0.12);
+  border-color: rgba(234, 179, 8, 0.4);
+  color: #eab308;
+}
+
+.setup-badge.price_only {
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.35);
+  color: var(--accent-blue);
+}
+
+.arb-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  width: 100%;
+  margin-top: 2px;
+}
+
+.arb-metrics span {
+  min-width: 0;
+  padding: 4px 5px;
+  border-radius: 6px;
+  background: rgba(2, 6, 23, 0.45);
+  border: 1px solid rgba(30, 41, 59, 0.9);
+  font-size: 0.68rem;
+  line-height: 1.15;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.metric-good {
+  color: var(--success-green);
+}
+
+.metric-bad {
+  color: var(--danger-red);
+}
+
+.metric-warn {
+  color: #eab308;
+}
+
+.metric-muted {
+  color: var(--text-secondary);
 }
 
 /* Settlement Mismatch Warning Badge */
@@ -1108,4 +1177,223 @@ tbody tr:hover {
     padding: 3px 8px;
     font-size: 0.7rem;
   }
+}
+
+/* Multi-user position manager */
+.tab-pills {
+  display: flex;
+  gap: 4px;
+}
+
+.tab-pill {
+  background: transparent;
+  border: 1px solid var(--card-border);
+  color: var(--text-secondary);
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.tab-pill:hover {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+
+.tab-pill.active {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+
+.role-tag {
+  margin-left: 6px;
+  background: rgba(234, 179, 8, 0.15);
+  color: #eab308;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.health-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.health-badge.healthy {
+  color: var(--success-green);
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.health-badge.watch {
+  color: #eab308;
+  background: rgba(234, 179, 8, 0.1);
+}
+
+.health-badge.reversal {
+  color: var(--danger-red);
+  background: rgba(239, 68, 68, 0.1);
+  animation: healthPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes healthPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.row-reversal {
+  background: rgba(239, 68, 68, 0.05) !important;
+  border-left: 2px solid var(--danger-red);
+}
+
+.reversal-banner {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  font-size: 0.85rem;
+  color: var(--danger-red);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.reversal-chip {
+  background: rgba(239, 68, 68, 0.15);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.owner-chip {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--accent-blue);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.filter-bar select {
+  height: 36px;
+  font-size: 0.85rem;
+  padding: 0 8px;
+}
+
+.user-management {
+  padding-top: 4px;
+}
+
+.user-management h3 {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.user-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #020617;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+}
+
+.user-form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.user-form-row input,
+.user-form-row select {
+  flex: 1;
+  min-width: 120px;
+  height: 38px;
+  font-size: 0.85rem;
+}
+
+.user-form-row input[type="checkbox"] {
+  width: auto;
+  flex: none;
+}
+
+.user-table-wrap {
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.user-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.user-table-wrap th {
+  background: rgba(2, 6, 23, 0.8);
+  padding: 8px 12px;
+  font-size: 0.75rem;
+  text-align: left;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--card-border);
+}
+
+.user-table-wrap td {
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  border-bottom: 1px solid rgba(30, 41, 59, 0.5);
+}
+
+.user-table-wrap tr:last-child td {
+  border-bottom: none;
+}
+
+.role-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.role-badge.admin {
+  color: #eab308;
+  background: rgba(234, 179, 8, 0.1);
+}
+
+.role-badge.trader {
+  color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.manager-view .pos-list {
+  margin-top: 0;
+}
+
+.manager-view .pos-list h3 {
+  font-size: 0.85rem;
+  margin-bottom: 8px;
 }
