@@ -27,42 +27,112 @@
 
 ### 1. 配置环境变量
 
-复制 `.env.example` (如果存在) 为 `.env` 或直接在项目根目录下编辑 `.env` 文件：
+复制 `env.example` 为 `.env`，再修改里面的 webhook、登录密码和阈值：
+
+```bash
+cp env.example .env
+nano .env
+
+# 如果 .env 是从 Windows 复制到 Linux，先清理 Windows 换行符
+sed -i 's/\r$//' .env
+```
+
+至少建议修改：
 
 ```ini
-# --- 核心通知配置 ---
-# 建议配置至少一种通知渠道
-NADO_VARIATIONAL_WECHAT_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
-# TG_BOT_TOKEN=xxxxxxxx:yyyyyyy
-# TG_CHAT_ID=-123456789
-# LARK_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
-
-# --- 监控与显示门槛 ---
-# 只有价差、费率差距、综合差距同时大于以下设定 (基点) 时，面板才会高亮显示
-DASHBOARD_MIN_SPREAD_BPS=20
-DASHBOARD_MIN_FUNDING_BPS=10
-DASHBOARD_MIN_TOTAL_BPS=20
-
-# 只有价差、费率差距、综合差距同时大于以下设定 (基点) 时，才会触发微信/TG发送消息！
-NOTIFY_MIN_SPREAD_BPS=100
-NOTIFY_MIN_FUNDING_BPS=10
-NOTIFY_MIN_TOTAL_BPS=100
-
-# 过滤掉 24 小时成交额过低的冷门币（默认过滤低于 200,000 USD 的小币）
-GLOBAL_MIN_VOLUME_USD=200000
-
-# 最大价格容差过滤：防止某所上线同名假币导致虚假套利机会（例如 15.0%）
-MAX_PRICE_DEVIATION_PCT=15.0
+NADO_VARIATIONAL_WECHAT_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key
+POSITION_USER=admin
+POSITION_PASS=请改成强密码
+ARBITRAGE_SCAN_INTERVAL=10
+DASHBOARD_MAX_COVER_HOURS=24
+NOTIFY_MAX_COVER_HOURS=24
 ```
 
-### 2. 启动服务
+### 2. VPS 安装 / 升级 Node.js 和 npm
 
-**启动后台采集与 API 提供服务**：
+Web 面板是 Vite 前端，需要 Node.js 20+。如果 VPS 上是 Node 12/14，构建时可能报：
+
+```text
+SyntaxError: Unexpected reserved word
+```
+
+先查看版本：
+
 ```bash
-python api.py
+node -v
+npm -v
 ```
-默认会在本地 `http://127.0.0.1:8000` 启动接口服务与 Web 面板。
-直接用浏览器打开上述地址即可查看实时行情对比面板。
+
+推荐安装 Node.js 20：
+
+```bash
+sudo apt update
+sudo apt install -y curl ca-certificates
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+```
+
+如果安装时报 `libnode-dev` 或旧版 `nodejs` 文件冲突，先清理旧包：
+
+```bash
+sudo apt remove -y libnode-dev nodejs npm
+sudo apt autoremove -y
+sudo apt --fix-broken install -y
+
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+```
+
+如果仍然被 `libnode-dev` 卡住，再强制移除冲突包：
+
+```bash
+sudo dpkg -r --force-depends libnode-dev
+sudo apt --fix-broken install -y
+sudo apt install -y nodejs
+```
+
+确认版本：
+
+```bash
+node -v
+npm -v
+```
+
+正常应看到 `node` 为 `v20.x`，并且 `npm` 可以正常输出版本。
+
+### 3. 构建 Web 面板
+
+`dashboard/dist` 是构建产物，不会随 git 仓库提交。首次部署或前端代码更新后，需要构建一次：
+
+```bash
+cd /home/ubuntu/var-arbitrage/dashboard
+rm -rf node_modules
+npm ci
+npm run build
+```
+
+说明：
+
+- `npm ci` 会按 `package-lock.json` 安装依赖，适合服务器部署。
+- `npm audit` 提示可以先忽略，不要直接执行 `npm audit fix`，避免自动改依赖版本。
+- 新版 `start.sh` 会在缺少 `dashboard/dist/index.html` 或前端源码更新后自动构建面板。
+
+### 4. 启动服务
+
+```bash
+cd /home/ubuntu/var-arbitrage
+source .venv/bin/activate
+pip install -r requirements.txt
+./start.sh
+```
+
+默认会在 `http://服务器公网IP:8011` 提供 API 和 Web 面板。
+如果浏览器只看到 `{"detail":"Not Found"}`，通常是前端还没有构建成功，请检查：
+
+```bash
+ls -la dashboard/dist
+tail -100 logs/api.log
+```
 
 ## 🔹 系统参数详解
 
