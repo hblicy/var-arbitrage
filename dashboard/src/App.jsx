@@ -73,23 +73,23 @@ const formatSignedBps = (value) => `${num(value) >= 0 ? '+' : ''}${num(value).to
 const formatSignedPercent = (value, digits = 2) => `${num(value) >= 0 ? '+' : ''}${num(value).toFixed(digits)}%`;
 
 const formatCoverTime = (coverHours, spreadBps) => {
-  if (num(spreadBps) >= 0) return 'No cover';
-  if (!Number.isFinite(Number(coverHours))) return 'No cover';
+  if (num(spreadBps) >= 0) return '无需覆盖';
+  if (!Number.isFinite(Number(coverHours))) return '无法估算';
   const hours = Number(coverHours);
   if (hours < 1) return `${Math.round(hours * 60)}m`;
   return `${hours.toFixed(1)}h`;
 };
 
 const opportunityTypeLabel = (type) => ({
-  aligned: 'Aligned',
-  funding_cover: 'Funding cover',
-  price_only: 'Price only',
-  watch: 'Watch',
-}[type] || 'Watch');
+  aligned: '价差+资金费同向',
+  funding_cover: '资金费覆盖',
+  price_only: '仅价差',
+  watch: '观察',
+}[type] || '观察');
 
 const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity }) {
   if (!opportunity) {
-    return <div className="no-arb-hint">No valid pair</div>;
+    return <div className="no-arb-hint">无有效组合</div>;
   }
 
   const buyEx = opportunity.details.buy_exchange;
@@ -116,44 +116,44 @@ const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity }) {
     <div className="arb-container">
       <div className="arb-action">
         <span className="exchange-pill buy">
-          <span style={{ opacity: 0.7 }}>Long</span> {formatExchangeName(buyEx)}
+          <span style={{ opacity: 0.7 }}>做多</span> {formatExchangeName(buyEx)}
         </span>
         <span className="arb-arrow">-&gt;</span>
         <span className="exchange-pill sell">
-          <span style={{ opacity: 0.7 }}>Short</span> {formatExchangeName(sellEx)}
+          <span style={{ opacity: 0.7 }}>做空</span> {formatExchangeName(sellEx)}
         </span>
       </div>
       <div className="arb-details">
         <div className={`setup-badge ${setupType}`}>{opportunityTypeLabel(setupType)}</div>
         <div className="arb-total-yield">
           {formatSignedPercent(projected24hPercent)}
-          <small>&nbsp; 24h est</small>
+          <small>&nbsp; 24h估算</small>
         </div>
         <div className="arb-metrics">
           <span className={priceBps >= 0 ? 'metric-good' : 'metric-bad'}>
-            Price {formatSignedBps(priceBps)}
+            价差 {formatSignedBps(priceBps)}
           </span>
           <span className={fundingDailyBps >= 0 ? 'metric-good' : 'metric-bad'}>
-            Funding {formatSignedPercent(fundingDailyBps / 100)}/d
+            资金费 {formatSignedPercent(fundingDailyBps / 100)}/天
           </span>
           <span className={priceBps < 0 ? 'metric-warn' : 'metric-muted'}>
-            Cover {formatCoverTime(coverHours, priceBps)}
+            覆盖 {formatCoverTime(coverHours, priceBps)}
           </span>
         </div>
         <div className="arb-breakdown">
           <span>{formatSignedBps(fundingHourlyBps)} bps/h</span>
-          <span>Vol {formatVolume(buyVolume)} | {formatVolume(sellVolume)}</span>
+          <span>量 {formatVolume(buyVolume)} | {formatVolume(sellVolume)}</span>
         </div>
         {(hasMismatch || opportunity.details.suggest_limit_order) && (
           <div className="arb-badges">
             {hasMismatch && (
-              <span className="mismatch-badge" title={`Settlement mismatch: ${buyEx} ${buyInterval}h vs ${sellEx} ${sellInterval}h`}>
+              <span className="mismatch-badge" title={`资金费结算周期不同：${buyEx} ${buyInterval}h vs ${sellEx} ${sellInterval}h`}>
                 ! {buyInterval}h/{sellInterval}h
               </span>
             )}
             {opportunity.details.suggest_limit_order && (
-              <span className="limit-order-badge" title="High slippage detected, use limit orders">
-                Limit order
+              <span className="limit-order-badge" title="检测到滑点风险，建议使用限价单">
+                限价单
               </span>
             )}
           </div>
@@ -203,7 +203,7 @@ const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, sym
       })}
       <td className="gap-cell">
         <div className="gap-value">
-          <span className={`apr-yield ${dailyYield > 2 ? 'glow' : ''}`}>{dailyYield.toFixed(2)}% <small>/day</small></span>
+          <span className={`apr-yield ${dailyYield > 2 ? 'glow' : ''}`}>{dailyYield.toFixed(2)}% <small>/天</small></span>
           <span className="bps-value">{delta.toFixed(1)} bps / {baseInterval}h</span>
         </div>
       </td>
@@ -244,7 +244,7 @@ function App() {
       setError(null);
     } catch (err) {
       if (err.name === 'AbortError') return;
-      setError('Connection to backend failed. Make sure api.py is running.');
+      setError('连接后端失败，请确认 api.py 正在运行。');
       console.error('Fetch error:', err);
     } finally {
       if (abortControllerRef.current === controller) {
@@ -411,15 +411,15 @@ function App() {
     <div className="app-container">
       <header>
         <div className="title-section">
-          <h1>Arbitrage Control Center</h1>
+          <h1>套利监控中心</h1>
           <div className="update-info">
             <span className="dot"></span>
-            Last Update: {lastUpdateText} (Multi-Exchange Mode)
+            更新时间：{lastUpdateText}（多交易所模式）
           </div>
         </div>
 
         <div className="filter-controls">
-          <div className="filter-label">Exchanges:</div>
+          <div className="filter-label">交易所：</div>
           <div className="exchange-toggles">
             {exchangeStates.map(ex => (
               <label key={ex.name} className={`toggle-pill ${ex.enabled ? 'active' : ''}`}>
@@ -434,7 +434,7 @@ function App() {
           </div>
           <div className="header-actions" style={{ marginLeft: 'auto' }}>
             <button className="manage-btn" onClick={() => setIsModalOpen(true)}>
-              Manage Positions
+              持仓管理
             </button>
           </div>
         </div>
@@ -444,15 +444,15 @@ function App() {
 
       <div className="stats-grid">
         <div className="stats-card">
-          <div className="stat-label">Markets Tracked</div>
+          <div className="stat-label">监控市场</div>
           <div className="stat-value">{totalMarkets}</div>
         </div>
         <div className="stats-card">
-          <div className="stat-label">Routes Shown</div>
+          <div className="stat-label">计算路线</div>
           <div className="stat-value highlight">{oppCount}</div>
         </div>
         <div className="stats-card">
-          <div className="stat-label">Best 24h Edge</div>
+          <div className="stat-label">最佳24h收益</div>
           <div className="stat-value highlight-green">
             {sortedSymbols.length > 0
               ? sortedSymbols[0].bestSymbolOpp
@@ -465,11 +465,11 @@ function App() {
           <div className="stat-sub">
             {sortedSymbols.length > 0
               ? sortedSymbols[0].bestSymbolOpp
-                ? `${sortedSymbols[0].sym} (24h est: ${sortedSymbols[0].bestDailyYieldBps.toFixed(1)} bps)`
+                ? `${sortedSymbols[0].sym}（24h估算：${sortedSymbols[0].bestDailyYieldBps.toFixed(1)} bps）`
                 : sortedSymbols[0].dailyYield > 0
-                  ? `${sortedSymbols[0].sym} (Funding Only)`
-                  : 'No opportunities'
-              : 'No opportunities'}
+                  ? `${sortedSymbols[0].sym}（仅资金费）`
+                  : '暂无机会'
+              : '暂无机会'}
           </div>
         </div>
       </div>
@@ -478,10 +478,10 @@ function App() {
         <table>
           <thead>
             <tr>
-              <th className="col-asset">Asset</th>
+              <th className="col-asset">币种</th>
               {exchanges.map(ex => <th key={ex}>{formatExchangeName(ex)}</th>)}
-              <th className="col-gap">Funding Edge</th>
-              <th className="col-action">Arbitrage</th>
+              <th className="col-gap">资金费差</th>
+              <th className="col-action">套利方向</th>
             </tr>
           </thead>
           <tbody>

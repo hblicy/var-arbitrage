@@ -953,7 +953,7 @@ tbody tr:hover {
   font-size: 0.75rem;
   opacity: 0.7;
   font-weight: 500;
-  text-transform: uppercase;
+  text-transform: none;
 }
 
 .arb-breakdown {
@@ -997,22 +997,24 @@ tbody tr:hover {
 }
 
 .arb-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 4px;
+  justify-content: center;
   width: 100%;
   margin-top: 2px;
 }
 
 .arb-metrics span {
   min-width: 0;
+  max-width: 100%;
   padding: 4px 5px;
   border-radius: 6px;
   background: rgba(2, 6, 23, 0.45);
   border: 1px solid rgba(30, 41, 59, 0.9);
   font-size: 0.68rem;
   line-height: 1.15;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   white-space: nowrap;
 }
 
