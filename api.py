@@ -66,7 +66,7 @@ app = FastAPI(title="Nado-Variational Arbitrage Monitor")
 # ===========================
 # Position Management Auth
 # ===========================
-security = HTTPBasic()
+security = HTTPBasic(auto_error=False)
 USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
 
@@ -102,26 +102,29 @@ def _get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
     return get_user_by_username(username)
 
 
-def get_current_user(credentials: HTTPBasicCredentials = Depends(security)) -> Dict[str, Any]:
+def get_current_user(credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> Dict[str, Any]:
     """Verify HTTP Basic Auth credentials against SQLite users."""
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing credentials",
+        )
+
     user = _get_user_by_username(credentials.username)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Basic"},
         )
     if not user.get("enabled", True):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account disabled",
-            headers={"WWW-Authenticate": "Basic"},
         )
     if not _verify_password(credentials.password, user["password_hash"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Basic"},
         )
     return {k: v for k, v in user.items() if k != "password_hash"}
 

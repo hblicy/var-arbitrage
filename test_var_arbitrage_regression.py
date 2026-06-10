@@ -15,6 +15,20 @@ from analyzer import analyse_markets
 from models import ArbitrageOpportunity, MarketDatum
 
 
+class TestAuthBehavior(unittest.TestCase):
+    """Regression tests for browser-friendly position auth."""
+
+    def test_missing_credentials_do_not_trigger_browser_basic_auth_prompt(self):
+        from fastapi import HTTPException
+        from api import get_current_user
+
+        with self.assertRaises(HTTPException) as ctx:
+            get_current_user(None)
+
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertNotIn("WWW-Authenticate", ctx.exception.headers or {})
+
+
 class MockConfig:
     """Mock config for testing."""
     class thresholds:
