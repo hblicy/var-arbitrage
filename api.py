@@ -6,9 +6,10 @@ from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 import sys
 import secrets
+import re
 
 # Ensure the parent directory is in the path so we can import our modules
 import os
@@ -66,6 +67,20 @@ app = FastAPI(title="Nado-Variational Arbitrage Monitor")
 # Position Management Auth
 # ===========================
 security = HTTPBasic()
+USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]+$")
+
+
+def _validate_username(username: str) -> None:
+    if not USERNAME_PATTERN.fullmatch(username):
+        raise HTTPException(
+            status_code=400,
+            detail="Username can only contain letters, numbers, '_' and '-'",
+        )
+
+
+def _validate_role(role: str) -> None:
+    if role not in ("admin", "trader"):
+        raise HTTPException(status_code=400, detail="role must be admin or trader")
 
 def _verify_password(plain: str, hashed: str) -> bool:
     """Verify Basic Auth password against the users table hash."""
@@ -492,18 +507,12 @@ async def toggle_exchange(item: ExchangeToggle):
 # ===========================
 
 class UserCreate(BaseModel):
-    username: str = Field(..., min_length=2, max_length=32, pattern=r"^[a-zA-Z0-9_\-]+$")
+    username: str = Field(..., min_length=2, max_length=32)
     password: str = Field(..., min_length=6, max_length=128)
     display_name: str = Field(default="", max_length=64)
     role: str = Field(default="trader")
     wecom_webhook: str = Field(default="", max_length=512)
     enabled: bool = True
-
-    @model_validator(mode="after")
-    def validate_role(self):
-        if self.role not in ("admin", "trader"):
-            raise ValueError("role must be admin or trader")
-        return self
 
 
 class UserUpdate(BaseModel):
@@ -512,12 +521,6 @@ class UserUpdate(BaseModel):
     role: Optional[str] = None
     enabled: Optional[bool] = None
     password: Optional[str] = Field(default=None, min_length=6, max_length=128)
-
-    @model_validator(mode="after")
-    def validate_role(self):
-        if self.role is not None and self.role not in ("admin", "trader"):
-            raise ValueError("role must be admin or trader")
-        return self
 
 
 @app.get("/api/me")
@@ -537,6 +540,8 @@ async def list_users(_: Dict = Depends(require_admin)):
 async def create_user_endpoint(user: UserCreate, _: Dict = Depends(require_admin)):
     """Create user (admin only)."""
     from db import create_user
+    _validate_username(user.username)
+    _validate_role(user.role)
     try:
         result = create_user(
             username=user.username,
@@ -559,6 +564,8 @@ async def update_user_endpoint(user_id: str, update: UserUpdate, _: Dict = Depen
     target = get_user_by_id(user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
+    if update.role is not None:
+        _validate_role(update.role)
 
     fields = {}
     if update.display_name is not None:
