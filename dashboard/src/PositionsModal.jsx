@@ -12,6 +12,7 @@ const PositionsModal = ({ isOpen, onClose }) => {
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
     const refreshTimer = useRef(null);
+    const autoLoginAttempted = useRef(false);
 
     // ── Tab state ──────────────────────────────────────────────
     const [tab, setTab] = useState('my-positions'); // 'my-positions' | 'all-positions' | 'users'
@@ -35,9 +36,114 @@ const PositionsModal = ({ isOpen, onClose }) => {
     const [userForm, setUserForm] = useState({ username: '', password: '', display_name: '', role: 'trader', wecom_webhook: '', enabled: true });
     const [editingUser, setEditingUser] = useState(null); // user being edited
 
+    // ── Auth helpers ───────────────────────────────────────────
+    const getAuthHeader = useCallback((u, p) => 'Basic ' + btoa((u || username) + ':' + (p || password)), [username, password]);
+
+    const handleLogout = useCallback(() => {
+        localStorage.removeItem(AUTH_KEY);
+        setIsLoggedIn(false);
+        setCurrentUser(null);
+        setPositions({});
+        setReversals([]);
+        setAllUsers([]);
+        setTab('my-positions');
+    }, []);
+
+    // ── Data loading ────────────────────────────────────────────
+    const loadPositions = useCallback(async (options = {}) => {
+        const requestUser = options.user || currentUser;
+        if (!requestUser) return;
+        try {
+            const params = new URLSearchParams();
+            const requestIsAdmin = requestUser.role === 'admin';
+            const requestTab = options.tab || tab;
+            const requestFilterOwner = options.filterOwner ?? filterOwner;
+            const authHeader = options.authHeader || getAuthHeader();
+
+            if (requestIsAdmin && requestTab === 'all-positions' && requestFilterOwner) {
+                params.set('all_users', '1');
+                params.set('owner', requestFilterOwner);
+            } else if (requestIsAdmin && requestTab === 'all-positions') {
+                params.set('all_users', '1');
+            }
+
+            const url = '/api/positions/pnl' + (params.toString() ? '?' + params : '');
+            const res = await fetch(url, { headers: { 'Authorization': authHeader } });
+            if (res.status === 401) { handleLogout(); return; }
+            if (res.ok) setPositions(await res.json());
+        } catch {
+            setError('加载持仓失败');
+        }
+    }, [currentUser, tab, filterOwner, getAuthHeader, handleLogout]);
+
+    const loadReversals = useCallback(async (options = {}) => {
+        const requestUser = options.user || currentUser;
+        if (!requestUser) return;
+        try {
+            const params = new URLSearchParams();
+            const requestFilterOwner = options.filterOwner ?? filterOwner;
+            if (requestUser.role === 'admin') {
+                params.set('all_users', '1');
+                if (requestFilterOwner) params.set('owner', requestFilterOwner);
+            }
+            const query = params.toString();
+            const url = '/api/positions/reversals' + (query ? '?' + query : '');
+            const authHeader = options.authHeader || getAuthHeader();
+            const res = await fetch(url, { headers: { 'Authorization': authHeader } });
+            if (res.ok) setReversals(await res.json());
+        } catch {
+            setError('加载反转提醒失败');
+        }
+    }, [currentUser, filterOwner, getAuthHeader]);
+
+    const loadAllUsers = useCallback(async (options = {}) => {
+        try {
+            const authHeader = options.authHeader || getAuthHeader();
+            const res = await fetch('/api/users', { headers: { 'Authorization': authHeader } });
+            if (res.ok) setAllUsers(await res.json());
+        } catch {
+            setError('加载用户列表失败');
+        }
+    }, [getAuthHeader]);
+
+    const doLogin = useCallback(async (u, p, save = true) => {
+        setLoading(true);
+        setError('');
+        try {
+            const authHeader = getAuthHeader(u, p);
+            const res = await fetch('/api/me', { headers: { 'Authorization': authHeader } });
+            if (res.status === 401) { setIsLoggedIn(false); setCurrentUser(null); setError('登录失败'); return; }
+            if (!res.ok) { setError('请求失败'); return; }
+            const user = await res.json();
+            setCurrentUser(user);
+            setIsLoggedIn(true);
+            if (save) localStorage.setItem(AUTH_KEY, JSON.stringify({ u, p }));
+            const initialLoads = [
+                loadPositions({ user, authHeader }),
+                loadReversals({ user, authHeader }),
+            ];
+            if (user.role === 'admin') {
+                initialLoads.push(loadAllUsers({ authHeader }));
+            }
+            await Promise.all(initialLoads);
+        } catch {
+            setError('网络错误');
+        } finally {
+            setLoading(false);
+        }
+    }, [getAuthHeader, loadPositions, loadReversals, loadAllUsers]);
+
+    const handleLogin = (e) => { e.preventDefault(); doLogin(username, password); };
+
     // ── Load saved auth on open ────────────────────────────────
     useEffect(() => {
-        if (!isOpen) return;
+        if (!isOpen) {
+            autoLoginAttempted.current = false;
+            return;
+        }
+        if (autoLoginAttempted.current) return;
+        autoLoginAttempted.current = true;
+
         const saved = localStorage.getItem(AUTH_KEY);
         if (saved) {
             try {
@@ -49,100 +155,23 @@ const PositionsModal = ({ isOpen, onClose }) => {
                 localStorage.removeItem(AUTH_KEY);
             }
         }
-    }, [isOpen]);
+    }, [isOpen, doLogin]);
 
     // ── Auto-refresh ───────────────────────────────────────────
     useEffect(() => {
         if (!isOpen || !isLoggedIn) return;
         refreshTimer.current = setInterval(() => {
             loadPositions();
-            if (isAdmin) loadReversals();
+            loadReversals();
         }, REFRESH_MS);
         return () => clearInterval(refreshTimer.current);
-    }, [isOpen, isLoggedIn, isAdmin, filterOwner]);
-
-    // ── Auth helpers ───────────────────────────────────────────
-    const getAuthHeader = (u, p) => 'Basic ' + btoa((u || username) + ':' + (p || password));
-
-    const doLogin = async (u, p, save = true) => {
-        setLoading(true);
-        setError('');
-        try {
-            const res = await fetch('/api/me', { headers: { 'Authorization': getAuthHeader(u, p) } });
-            if (res.status === 401) { setIsLoggedIn(false); setCurrentUser(null); setError('登录失败'); return; }
-            if (!res.ok) { setError('请求失败'); return; }
-            const user = await res.json();
-            setCurrentUser(user);
-            setIsLoggedIn(true);
-            if (save) localStorage.setItem(AUTH_KEY, JSON.stringify({ u, p }));
-            loadPositions();
-            if (user.role === 'admin') {
-                loadReversals();
-                loadAllUsers();
-            }
-        } catch {
-            setError('网络错误');
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const handleLogin = (e) => { e.preventDefault(); doLogin(username, password); };
-
-    const handleLogout = () => {
-        localStorage.removeItem(AUTH_KEY);
-        setIsLoggedIn(false);
-        setCurrentUser(null);
-        setPositions({});
-        setReversals([]);
-        setAllUsers([]);
-        setTab('my-positions');
-    };
-
-    // ── Data loading ────────────────────────────────────────────
-    const loadPositions = useCallback(async () => {
-        if (!currentUser) return;
-        try {
-            const params = new URLSearchParams();
-            if (isAdmin && tab === 'all-positions' && filterOwner) {
-                params.set('all_users', '1');
-                params.set('owner', filterOwner);
-            } else if (isAdmin && tab === 'all-positions') {
-                params.set('all_users', '1');
-            }
-
-            const url = '/api/positions/pnl' + (params.toString() ? '?' + params : '');
-            const res = await fetch(url, { headers: { 'Authorization': getAuthHeader() } });
-            if (res.status === 401) { handleLogout(); return; }
-            if (res.ok) setPositions(await res.json());
-        } catch {
-            setError('加载持仓失败');
-        }
-    }, [currentUser, isAdmin, tab, filterOwner, username, password]);
-
-    const loadReversals = async () => {
-        try {
-            const params = new URLSearchParams({ all_users: '1' });
-            const res = await fetch('/api/positions/reversals?' + params, { headers: { 'Authorization': getAuthHeader() } });
-            if (res.ok) setReversals(await res.json());
-        } catch {
-            setError('加载反转提醒失败');
-        }
-    };
-
-    const loadAllUsers = async () => {
-        try {
-            const res = await fetch('/api/users', { headers: { 'Authorization': getAuthHeader() } });
-            if (res.ok) setAllUsers(await res.json());
-        } catch {
-            setError('加载用户列表失败');
-        }
-    };
+    }, [isOpen, isLoggedIn, loadPositions, loadReversals]);
 
     useEffect(() => {
         if (isLoggedIn && (tab === 'my-positions' || tab === 'all-positions')) loadPositions();
+        if (isLoggedIn && (tab === 'my-positions' || tab === 'all-positions')) loadReversals();
         if (isLoggedIn && isAdmin && tab === 'users') loadAllUsers();
-    }, [tab]);
+    }, [isLoggedIn, isAdmin, tab, filterOwner, loadPositions, loadReversals, loadAllUsers]);
 
     // ── Position actions ───────────────────────────────────────
     const handleAdd = async (e) => {
@@ -164,7 +193,8 @@ const PositionsModal = ({ isOpen, onClose }) => {
             });
             if (res.ok) {
                 setNewSymbol(''); setEntryQty(''); setEntryPriceLong(''); setEntryPriceShort('');
-                loadPositions();
+                await loadPositions();
+                await loadReversals();
             } else { const d = await res.json(); setError(d.detail || 'Failed'); }
         } catch { setError('Network error'); }
         finally { setLoading(false); }
@@ -176,7 +206,8 @@ const PositionsModal = ({ isOpen, onClose }) => {
             await fetch(`/api/positions/${encodeURIComponent(posId)}`, {
                 method: 'DELETE', headers: { 'Authorization': getAuthHeader() },
             });
-            loadPositions();
+            await loadPositions();
+            await loadReversals();
         } catch { setError('Delete failed'); }
     };
 
