@@ -9,9 +9,10 @@
 - **Binance** (`binance`) - 作为流动性最大基准
 - **Lighter** (`lighter`)
 - **Hyperliquid** (`hyperliquid`) - **NEW in v1.6!** 深度流动性，1h 资金费率结算
-- **EdgeX** (`edgex`)
+- **Aster** (`aster`) - REST API 版，吃单费率按 0.04% 计算
 - **Backpack** (`backpack`)
 - **GRVT** (`grvt`)
+- **OndoPerps** (`ondoperps`) - REST API 版
 
 *(在 v1.6 中，Paradex 被移除并替换为 Hyperliquid，以获得更大的日均交易量和更好的价差捕捉能力。)*
 

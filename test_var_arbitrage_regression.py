@@ -12,6 +12,10 @@ sys.path.insert(0, r'd:\code-web3\DEX\var-arbitrage_v1.6')
 from position_tracker import check_exit_signals
 from notifier import _format_exit_alerts, _format_text
 from analyzer import analyse_markets
+from collectors.ondoperps import OndoPerpsCollector
+from collectors.aster import AsterCollector
+from collectors.factory import create_collector
+from config import Settings
 from models import ArbitrageOpportunity, MarketDatum
 
 
@@ -41,6 +45,163 @@ class MockConfig:
             m = MagicMock()
             m.taker_bps = 5.0
             return m
+
+
+class FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class FakeOndoClient:
+    async def request(self, **_kwargs):
+        return FakeResponse({
+            "success": True,
+            "result": [
+                {
+                    "market": "CRCL-USD.P",
+                    "disabled": False,
+                    "lastPrice": "66.54",
+                    "bid": "66.51",
+                    "ask": "66.55",
+                    "quoteVolume": "471688.752",
+                    "fundingRate": "-0.0001634",
+                    "nextFundingRate": "0.0000023",
+                    "nextFundingRateTimestamp": "2026-07-04T14:00:00Z",
+                },
+                {
+                    "market": "ZERO-USD.P",
+                    "disabled": False,
+                    "lastPrice": "10",
+                    "bid": "9.9",
+                    "ask": "10.1",
+                    "quoteVolume": "1000000",
+                    "fundingRate": "-0.001",
+                    "nextFundingRate": "0",
+                },
+                {
+                    "market": "BTC-USD.P",
+                    "disabled": True,
+                    "lastPrice": "60000",
+                    "quoteVolume": "1000000",
+                    "nextFundingRate": "0.0001",
+                },
+            ],
+        })
+
+
+class FakeAsterClient:
+    async def get(self, path):
+        if path == "/fapi/v1/ticker/24hr":
+            return FakeResponse([
+                {
+                    "symbol": "CRCLUSDT",
+                    "lastPrice": "66.54",
+                    "quoteVolume": "471688.752",
+                },
+                {
+                    "symbol": "BTCUSDT",
+                    "lastPrice": "60000",
+                    "quoteVolume": "1000000",
+                },
+                {
+                    "symbol": "GNSUSD",
+                    "lastPrice": "3.5",
+                    "quoteVolume": "1000000",
+                },
+                {
+                    "symbol": "SHIELDAMZNUSDT",
+                    "lastPrice": "200",
+                    "quoteVolume": "1000000",
+                },
+            ])
+        if path == "/fapi/v1/premiumIndex":
+            return FakeResponse([
+                {
+                    "symbol": "CRCLUSDT",
+                    "markPrice": "66.55",
+                    "lastFundingRate": "-0.00008481",
+                    "nextFundingTime": 1783180800000,
+                },
+                {
+                    "symbol": "BTCUSDT",
+                    "markPrice": "60001",
+                    "lastFundingRate": "0.00001",
+                    "nextFundingTime": 1783180800000,
+                },
+            ])
+        if path == "/fapi/v1/ticker/bookTicker":
+            return FakeResponse([
+                {"symbol": "CRCLUSDT", "bidPrice": "66.51", "askPrice": "66.55"},
+                {"symbol": "BTCUSDT", "bidPrice": "59990", "askPrice": "60010"},
+            ])
+        if path == "/fapi/v1/fundingInfo":
+            return FakeResponse([
+                {"symbol": "CRCLUSDT", "fundingIntervalHours": 8},
+                {"symbol": "BTCUSDT", "fundingIntervalHours": 1},
+            ])
+        raise AssertionError(f"unexpected path: {path}")
+
+
+class TestOndoPerpsCollector(unittest.IsolatedAsyncioTestCase):
+    async def test_contracts_are_normalized_with_next_funding_rate(self):
+        collector = OndoPerpsCollector(Settings().ondoperps)
+        collector._client = FakeOndoClient()
+
+        markets = await collector.fetch_markets(["CRCLUSDT", "ZEROUSDT", "BTCUSDT"])
+
+        self.assertIn("CRCLUSDT", markets)
+        self.assertNotIn("BTCUSDT", markets)
+
+        crcl = markets["CRCLUSDT"]
+        self.assertEqual(crcl.exchange, "OndoPerps")
+        self.assertEqual(crcl.price, 66.54)
+        self.assertEqual(crcl.best_bid, 66.51)
+        self.assertEqual(crcl.best_ask, 66.55)
+        self.assertEqual(crcl.volume_24h, 471688.752)
+        self.assertEqual(crcl.native_interval_hours, 1)
+        self.assertEqual(crcl.funding_rate, 0.0000023)
+        self.assertEqual(crcl.next_funding_time, 1783173600000.0)
+
+        self.assertEqual(markets["ZEROUSDT"].funding_rate, 0.0)
+
+
+class TestAsterCollector(unittest.IsolatedAsyncioTestCase):
+    async def test_rest_markets_include_funding_book_and_interval(self):
+        collector = AsterCollector(Settings().aster)
+        collector._client = FakeAsterClient()
+
+        markets = await collector.fetch_markets(["CRCLUSDT", "BTCUSDT", "GNSUSD", "SHIELDAMZNUSDT"])
+
+        self.assertIn("CRCLUSDT", markets)
+        self.assertIn("BTCUSDT", markets)
+        self.assertNotIn("GNSUSD", markets)
+        self.assertNotIn("SHIELDAMZNUSDT", markets)
+
+        crcl = markets["CRCLUSDT"]
+        self.assertEqual(crcl.exchange, "Aster")
+        self.assertEqual(crcl.price, 66.54)
+        self.assertEqual(crcl.best_bid, 66.51)
+        self.assertEqual(crcl.best_ask, 66.55)
+        self.assertEqual(crcl.volume_24h, 471688.752)
+        self.assertEqual(crcl.native_interval_hours, 8)
+        self.assertEqual(crcl.funding_rate, -0.00008481)
+        self.assertEqual(crcl.next_funding_time, 1783180800000.0)
+
+        self.assertEqual(markets["BTCUSDT"].native_interval_hours, 1)
+
+    def test_aster_enabled_and_edgex_removed(self):
+        settings = Settings()
+
+        self.assertIn("aster", settings.exchanges)
+        self.assertNotIn("edgex", settings.exchanges)
+        self.assertEqual(settings.aster.taker_bps, 4.0)
+        self.assertIsInstance(create_collector("aster", settings.aster), AsterCollector)
 
 
 class TestCheckExitSignalsPriceInjection(unittest.TestCase):

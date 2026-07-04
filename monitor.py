@@ -16,7 +16,6 @@ from collectors.variational import VariationalCollector
 from collectors.binance import BinanceCollector
 from collectors.lighter import LighterCollector
 from collectors.hyperliquid import HyperliquidCollector
-from collectors.edgex import EdgeXCollector
 from collectors.backpack import BackpackCollector
 from config import Settings, settings
 from notifier import WeChatNotifier

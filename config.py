@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 import copy
 import os
 from dotenv import load_dotenv
@@ -336,30 +336,36 @@ class Settings:
         ),
         taker_bps=_env_float("HYPERLIQUID_TAKER_FEE_BPS", 4.5),  # Hyperliquid: 0.015% maker / 0.045% taker
     ))
-    edgex: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
-        name="EdgeX",
-        base_url=os.getenv("EDGEX_BASE_URL", "https://pro.edgex.exchange"),
-        # WS URL for real-time data
-        ws_url="wss://quote.edgex.exchange/api/v1/public/ws",
-        timeout=_env_float("EDGEX_HTTP_TIMEOUT", 10.0),
+    aster: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
+        name="Aster",
+        base_url=os.getenv("ASTER_BASE_URL", "https://fapi.asterdex.com"),
+        timeout=_env_float("ASTER_HTTP_TIMEOUT", 10.0),
         symbol_overrides={},
-
-        excluded_symbols={"FFUSDT", "TEMP", "STXUSDT", "BERAUSDT"}, # Filter out test/junk tokens
-        symbol_pattern=r"^([A-Z0-9]+)USD$",
+        symbol_pattern=r"^([A-Z0-9]+)USDT$",
         price_endpoint=Endpoint(
             method="GET",
-            path="/api/v1/public/quote/getTicker",
-            symbol_key="contractName",
+            path="/fapi/v1/ticker/24hr",
+            symbol_key="symbol",
             price_key="lastPrice",
-            funding_key="fundingRate",
+            volume_key="quoteVolume",
         ),
-        taker_bps=3.6,  # EdgeX: 0.015% maker / 0.036% taker
+        funding_endpoint=Endpoint(
+            method="GET",
+            path="/fapi/v1/premiumIndex",
+            symbol_key="symbol",
+            funding_key="lastFundingRate",
+        ),
+        taker_bps=_env_float("ASTER_TAKER_FEE_BPS", 4.0),  # Aster: 0% maker / 0.04% taker
         extra_headers={
-            "Referer": "https://pro.edgex.exchange/trade/BTCUSD",
-            "Origin": "https://pro.edgex.exchange",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "Accept": "application/json",
+            "Referer": "https://www.asterdex.com/",
+            "Origin": "https://www.asterdex.com",
+            "User-Agent": os.getenv(
+                "ASTER_USER_AGENT",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+            ),
         },
-        min_volume_usd=_env_float("EDGEX_MIN_VOLUME_USD", 100000.0), # 默认过滤掉低于 10w USD 交易额的币种
+        min_volume_usd=_env_float("ASTER_MIN_VOLUME_USD", 0.0),
     ))
     backpack: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
         name="Backpack",
@@ -403,6 +409,33 @@ class Settings:
         ),
         taker_bps=4.5,  # GRVT: -0.0001% maker / 0.045% taker
     ))
+    ondoperps: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
+        name="OndoPerps",
+        base_url=os.getenv("ONDOPERPS_BASE_URL", "https://api.ondoperps.xyz"),
+        timeout=_env_float("ONDOPERPS_HTTP_TIMEOUT", 10.0),
+        symbol_overrides={},
+        symbol_pattern=r"^([A-Z0-9]+)-USD\.P$",
+        price_endpoint=Endpoint(
+            method="GET",
+            path="/v1/perps/contracts",
+            response_path=["result"],
+            symbol_key="market",
+            price_key="lastPrice",
+            funding_key="nextFundingRate",
+            volume_key="quoteVolume",
+        ),
+        taker_bps=_env_float("ONDOPERPS_TAKER_FEE_BPS", 3.5),  # OndoPerps: 0.015% maker / 0.035% taker
+        extra_headers={
+            "Accept": "application/json",
+            "Referer": "https://app.ondoperps.xyz/",
+            "Origin": "https://app.ondoperps.xyz",
+            "User-Agent": os.getenv(
+                "ONDOPERPS_USER_AGENT",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+            ),
+        },
+        min_volume_usd=_env_float("ONDOPERPS_MIN_VOLUME_USD", 0.0),
+    ))
 
     @property
     def exchanges(self) -> Dict[str, ExchangeSettings]:
@@ -412,10 +445,11 @@ class Settings:
             "variational": self.variational,
             "nado": self.nado,
             "hyperliquid": self.hyperliquid,
-            "edgex": self.edgex,
+            "aster": self.aster,
             "lighter": self.lighter,
             "backpack": self.backpack,
             "grvt": self.grvt,
+            "ondoperps": self.ondoperps,
         }
 
     def save_runtime_config(self):

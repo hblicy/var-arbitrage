@@ -5,9 +5,10 @@ from collectors.variational import VariationalCollector
 from collectors.binance import BinanceCollector
 from collectors.lighter import LighterCollector
 from collectors.hyperliquid import HyperliquidCollector
-from collectors.edgex import EdgeXCollector
 from collectors.backpack import BackpackCollector
 from collectors.grvt import GrvtCollector
+from collectors.ondoperps import OndoPerpsCollector
+from collectors.aster import AsterCollector
 from config import ExchangeSettings
 
 COLLECTOR_MAP: Dict[str, Type[MarketCollector]] = {
@@ -16,9 +17,10 @@ COLLECTOR_MAP: Dict[str, Type[MarketCollector]] = {
     "binance": BinanceCollector,
     "lighter": LighterCollector,
     "hyperliquid": HyperliquidCollector,
-    "edgex": EdgeXCollector,
     "backpack": BackpackCollector,
     "grvt": GrvtCollector,
+    "ondoperps": OndoPerpsCollector,
+    "aster": AsterCollector,
 }
 
 def create_collector(key: str, settings: ExchangeSettings) -> MarketCollector:

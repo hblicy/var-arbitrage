@@ -3,8 +3,9 @@
     "variational": true,
     "nado": true,
     "hyperliquid": true,
-    "edgex": true,
+    "aster": true,
     "lighter": true,
     "backpack": true,
-    "grvt": true
+    "grvt": true,
+    "ondoperps": true
 }

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 const AUTH_KEY = 'pos_auth_v2'; // upgraded key
 const REFRESH_MS = 30000;
+const POSITION_EXCHANGES = ['variational', 'binance', 'nado', 'hyperliquid', 'aster', 'lighter', 'backpack', 'grvt', 'ondoperps'];
 
 const PositionsModal = ({ isOpen, onClose }) => {
     // ── Auth state ─────────────────────────────────────────────
@@ -360,12 +361,12 @@ const PositionsModal = ({ isOpen, onClose }) => {
                                         <form onSubmit={handleAdd} className="add-form">
                                             <input type="text" placeholder="Symbol" value={newSymbol} onChange={e => setNewSymbol(e.target.value)} required />
                                             <select value={longEx} onChange={e => setLongEx(e.target.value)}>
-                                                {['variational','binance','nado','hyperliquid','edgex','lighter','backpack','grvt'].map(ex => (
+                                                {POSITION_EXCHANGES.map(ex => (
                                                     <option key={ex} value={ex}>{ex} (Long)</option>
                                                 ))}
                                             </select>
                                             <select value={shortEx} onChange={e => setShortEx(e.target.value)}>
-                                                {['binance','variational','nado','hyperliquid','edgex','lighter','backpack','grvt'].map(ex => (
+                                                {POSITION_EXCHANGES.map(ex => (
                                                     <option key={ex} value={ex}>{ex} (Short)</option>
                                                 ))}
                                             </select>

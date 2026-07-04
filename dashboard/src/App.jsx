@@ -4,7 +4,7 @@ import PositionsModal from './PositionsModal';
 const STORAGE_KEY = 'arbitrage_exchange_prefs';
 const MIN_EXCHANGES_REQUIRED = 2;
 const POLL_INTERVAL_MS = 10000;
-const DEFAULT_EXCHANGES = ['binance', 'variational', 'nado', 'hyperliquid', 'edgex', 'lighter', 'backpack', 'grvt'];
+const DEFAULT_EXCHANGES = ['binance', 'variational', 'nado', 'hyperliquid', 'aster', 'lighter', 'backpack', 'grvt', 'ondoperps'];
 const EMPTY_DASHBOARD_DATA = {
   markets: {},
   opportunities: [],
@@ -31,7 +31,12 @@ const getDashboardSignature = (item) => [
   (item.opportunities || []).length,
 ].join('|');
 
-const formatExchangeName = (name) => name.charAt(0).toUpperCase() + name.slice(1);
+const EXCHANGE_LABELS = {
+  aster: 'Aster',
+  ondoperps: 'OndoPerps',
+};
+
+const formatExchangeName = (name) => EXCHANGE_LABELS[name] || name.charAt(0).toUpperCase() + name.slice(1);
 
 const formatLastUpdate = (value) => {
   if (!value || value === 'Never' || value === 'Loading...') return value || 'Loading...';
