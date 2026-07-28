@@ -79,8 +79,12 @@ class WeChatNotifier:
             logger.debug("Skip arbitrage alert outside notify window (offset=%s)", offset)
             return
 
-        items = list(opportunities)
+        items = [
+            opp for opp in opportunities
+            if opp.details.get("entry_check_supported") is True
+        ]
         if not items:
+            logger.debug("Skip arbitrage alert because no route supports two-sided depth checks.")
             return
 
         whitelist = self.settings.notification_exchanges
@@ -112,14 +116,16 @@ class WeChatNotifier:
                 )
                 continue
 
-            self._last_sent[key] = now
             final_items.append(opp)
 
         if not final_items:
             return
 
-        self._save_state()
         if await self._post(webhook, _format_text(final_items)):
+            for opp in final_items:
+                key = f"{opp.symbol}_{opp.direction}"
+                self._last_sent[key] = now
+            self._save_state()
             logger.info("已发送 %d 条套利通知", len(final_items))
 
     async def send_exit_alerts(self, exit_signals: List[Dict]) -> None:
@@ -243,7 +249,10 @@ def _format_exit_alerts(signals: List[Dict]) -> str:
 
 def _format_text(items: Iterable[ArbitrageOpportunity]) -> str:
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    lines = [f"💰 套利提醒 [{current_time_str}]"]
+    lines = [
+        f"🔎 套利观察信号 [{current_time_str}]",
+        "以下不是开仓指令；请先在面板完成 1000 USDT/腿的实时深度复核。",
+    ]
 
     for opp in items:
         details = opp.details
@@ -302,7 +311,7 @@ def _format_text(items: Iterable[ArbitrageOpportunity]) -> str:
                 f"资金费优势：{_format_signed_percent(funding_hourly_bps / 100)}/h | "
                 f"{_format_signed_percent(funding_daily_bps / 100)}/day\n"
                 f"覆盖时间：{cover_text}\n"
-                f"24h估算：{_format_signed_percent(projected_24h_bps / 100)}（价差+资金费）\n"
+                f"24h假设收敛估算：{_format_signed_percent(projected_24h_bps / 100)}（价差+资金费，非已实现收益）\n"
                 f"资金费时差：{interval_display}"
                 f"{hl_note}"
                 f"{limit_note}"

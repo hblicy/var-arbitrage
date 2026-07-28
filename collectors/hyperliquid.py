@@ -44,7 +44,7 @@ class HyperliquidCollector(MarketCollector):
             return self.settings.symbol_overrides[raw_name]
         return f"{raw_name.upper()}USDT"
 
-    @with_retry(max_retries=3, backoff_base=2, default_return={})
+    @with_retry(max_retries=3, backoff_base=2)
     async def fetch_markets(self, symbols: Iterable[str]) -> Dict[str, MarketDatum]:
         """Fetch all perpetual market data from Hyperliquid in one API call."""
         target_symbols = list(symbols)

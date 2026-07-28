@@ -32,7 +32,7 @@ class AsterCollector(MarketCollector):
             return raw_symbol
         return None
 
-    @with_retry(max_retries=3, backoff_base=2, default_return={})
+    @with_retry(max_retries=3, backoff_base=2)
     async def fetch_markets(self, symbols: Iterable[str]) -> Dict[str, MarketDatum]:
         """Fetch Aster ticker, funding and top-of-book snapshots."""
         symbol_set = set(symbols)
@@ -109,22 +109,28 @@ class AsterCollector(MarketCollector):
         return markets
 
     async def _refresh_intervals(self) -> None:
-        try:
-            resp = await self._client.get("/fapi/v1/fundingInfo")
-            resp.raise_for_status()
-            data = resp.json()
-            if not isinstance(data, list):
-                return
-            self._interval_map = {
-                item["symbol"]: int(item.get("fundingIntervalHours") or 8)
-                for item in data
-                if item.get("symbol")
-            }
-        except Exception as exc:
-            logger.warning("Failed to refresh Aster funding intervals: %s", exc)
+        resp = await self._client.get("/fapi/v1/fundingInfo")
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list):
+            raise ValueError("Aster returned invalid fundingInfo payload")
+        self._interval_map = {
+            item["symbol"]: int(item.get("fundingIntervalHours") or 8)
+            for item in data
+            if item.get("symbol")
+        }
 
     async def aclose(self):
         pass
+
+    async def fetch_order_book(self, symbol: str, limit: int) -> Dict[str, list[list[float]]]:
+        resp = await self._client.get("/fapi/v1/depth", params={"symbol": symbol, "limit": limit})
+        resp.raise_for_status()
+        payload = resp.json()
+        return {
+            "bids": [[float(price), float(size)] for price, size, *_ in payload.get("bids", [])],
+            "asks": [[float(price), float(size)] for price, size, *_ in payload.get("asks", [])],
+        }
 
 
 def _safe_float(value) -> Optional[float]:

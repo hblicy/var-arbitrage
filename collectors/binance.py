@@ -29,22 +29,21 @@ class BinanceCollector(MarketCollector):
     async def _refresh_intervals(self):
         """Fetch fundingIntervalHours from fundingInfo."""
         import time
-        if time.time() - self._last_refresh < 3600 and self._interval_map:
+        refresh_seconds = self.settings.metadata_refresh_seconds
+        if time.time() - self._last_refresh < refresh_seconds and self._interval_map:
             return
             
-        try:
-            logger.info("Refreshing Binance fundingInfo for intervals...")
-            resp = await self._client.get("/fapi/v1/fundingInfo")
-            resp.raise_for_status()
-            data = resp.json()
-            for item in data:
-                sym = item["symbol"]
-                # Uses fundingIntervalHours specifically
-                self._interval_map[sym] = item.get("fundingIntervalHours", 8)
-            self._last_refresh = time.time()
-            logger.info(f"Refreshed intervals for {len(self._interval_map)} Binance symbols.")
-        except Exception as e:
-            logger.error(f"Failed to refresh Binance intervals: {e}")
+        logger.info("Refreshing Binance fundingInfo for intervals...")
+        resp = await self._client.get("/fapi/v1/fundingInfo")
+        resp.raise_for_status()
+        data = resp.json()
+        self._interval_map = {
+            item["symbol"]: int(item.get("fundingIntervalHours", 8))
+            for item in data
+            if item.get("symbol")
+        }
+        self._last_refresh = time.time()
+        logger.info(f"Refreshed intervals for {len(self._interval_map)} Binance symbols.")
 
     def _normalise_symbol(self, raw_symbol: str) -> Optional[str]:
         """Convert exchange symbol to unified symbol (e.g., BTCUSDT)."""
@@ -53,7 +52,7 @@ class BinanceCollector(MarketCollector):
             return self.settings.symbol_overrides[raw_symbol]
         return raw_symbol
 
-    @with_retry(max_retries=3, backoff_base=2, default_return={})
+    @with_retry(max_retries=3, backoff_base=2)
     async def fetch_markets(self, symbols: Iterable[str]) -> Dict[str, MarketDatum]:
         """Fetch prices and funding rates from Binance Futures public API."""
         await self._refresh_intervals()
@@ -128,6 +127,15 @@ class BinanceCollector(MarketCollector):
         logger.info(f"Fetched {len(markets)} markets from Binance.")
 
         return markets
+
+    async def fetch_order_book(self, symbol: str, limit: int) -> Dict[str, list[list[float]]]:
+        resp = await self._client.get("/fapi/v1/depth", params={"symbol": symbol, "limit": limit})
+        resp.raise_for_status()
+        payload = resp.json()
+        return {
+            "bids": [[float(price), float(size)] for price, size, *_ in payload.get("bids", [])],
+            "asks": [[float(price), float(size)] for price, size, *_ in payload.get("asks", [])],
+        }
 
     async def aclose(self):
         await self._client.close()

@@ -21,6 +21,8 @@ from collectors.variational import VariationalCollector
 from collectors.binance import BinanceCollector
 from analyzer import analyse_markets
 from notifier import WeChatNotifier
+from entry_check import annotate_entry_check_support, entry_check_supported as has_entry_check_support, evaluate_entry_quote
+from market_state import dashboard_snapshot, replace_exchange_snapshot
 from position_tracker import (
     add_position, remove_position,
     check_exit_signals, estimate_position_pnl, init_tracker,
@@ -60,8 +62,6 @@ from contextlib import asynccontextmanager, suppress
 if sys.platform == 'win32':
     import asyncio
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-app = FastAPI(title="Nado-Variational Arbitrage Monitor")
 
 # ===========================
 # Position Management Auth
@@ -135,11 +135,9 @@ def require_admin(current_user: Dict[str, Any] = Depends(get_current_user)) -> D
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
 
-# Use startup events as they are sometimes more reliable with Uvicorn on Windows
-@app.on_event("startup")
 async def startup_event():
     logger.info("Application Startup. Initializing collectors...")
-    global collectors_hub, notifier
+    global collectors_hub, notifier, update_task
     try:
         from db import create_user, get_all_users, init_db
         init_db()
@@ -178,11 +176,28 @@ async def startup_event():
     logger.info(f"Notifier initialized (Cooldown: {settings.notifications.cooldown_seconds}s)")
     
     logger.info("Starting background task...")
-    asyncio.create_task(update_data_loop())
+    update_task = asyncio.create_task(update_data_loop(), name="arbitrage-data-update")
 
-@app.on_event("shutdown")
 async def shutdown_event():
+    global update_task
+    if update_task is not None:
+        update_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await update_task
+        update_task = None
     logger.info("Application Shutdown.")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await startup_event()
+    try:
+        yield
+    finally:
+        await shutdown_event()
+
+
+app = FastAPI(title="Nado-Variational Arbitrage Monitor", lifespan=lifespan)
 
 # Enable CORS for frontend development
 app.add_middleware(
@@ -216,6 +231,7 @@ class DashboardData(BaseModel):
     symbol_max_intervals: Dict[str, int] = {}
     last_update: str
     data_version: int = 0
+    exchange_status: Dict[str, Dict[str, Any]] = {}
 
 # Shared state
 latest_data = {
@@ -226,16 +242,77 @@ latest_data = {
     "last_update": "Never",
     "data_version": 0,
     "last_notified_at": 0,  # Unix timestamp
-    "raw_exchanges_data": {} # Store latest successful fetch for re-analysis
+    "raw_exchanges_data": {},
+    "exchange_status": {},
 }
 
 def bump_data_version():
     latest_data["data_version"] = latest_data.get("data_version", 0) + 1
 
+
+async def evaluate_manual_entry(symbol: str, long_exchange: str, short_exchange: str) -> Dict[str, Any]:
+    """Requote a manual two-leg entry from supported exchange order books."""
+    long_key = long_exchange.lower()
+    short_key = short_exchange.lower()
+    long_collector = collectors_hub.get(long_key)
+    short_collector = collectors_hub.get(short_key)
+    if not long_collector or not short_collector:
+        return {"status": "unavailable", "reason": "COLLECTOR_UNAVAILABLE"}
+
+    if not entry_check_supported(long_key, short_key):
+        return {"status": "unavailable", "reason": "DEPTH_UNSUPPORTED"}
+    long_fetch = long_collector.fetch_order_book
+    short_fetch = short_collector.fetch_order_book
+
+    async def fetch_book(fetcher):
+        book = await fetcher(symbol, settings.entry_check.book_depth_limit)
+        return book, time.time()
+
+    try:
+        (buy_book, buy_quoted_at), (sell_book, sell_quoted_at) = await asyncio.gather(
+            fetch_book(long_fetch),
+            fetch_book(short_fetch),
+        )
+    except Exception as exc:
+        logger.warning("Manual entry requote failed for %s %s/%s: %s", symbol, long_key, short_key, exc)
+        return {"status": "unavailable", "reason": "QUOTE_FETCH_FAILED"}
+
+    result = evaluate_entry_quote(
+        buy_book=buy_book,
+        sell_book=sell_book,
+        notional_usd=settings.entry_check.notional_usd,
+        buy_fee_bps=settings.exchanges[long_key].taker_bps,
+        sell_fee_bps=settings.exchanges[short_key].taker_bps,
+        safety_buffer_bps=settings.entry_check.safety_buffer_bps,
+        buy_quoted_at=buy_quoted_at,
+        sell_quoted_at=sell_quoted_at,
+        checked_at=time.time(),
+        max_quote_age_ms=settings.entry_check.max_quote_age_ms,
+        max_leg_skew_ms=settings.entry_check.max_leg_skew_ms,
+    )
+    result.update({
+        "symbol": symbol,
+        "long_exchange": long_key,
+        "short_exchange": short_key,
+        "notional_usd": settings.entry_check.notional_usd,
+        "safety_buffer_bps": settings.entry_check.safety_buffer_bps,
+    })
+    return result
+
+
+def entry_check_supported(
+    long_exchange: str,
+    short_exchange: str,
+    collectors: Dict[str, Any] | None = None,
+) -> bool:
+    registry = collectors_hub if collectors is None else collectors
+    return has_entry_check_support(long_exchange, short_exchange, registry)
+
 # Global collectors registry
 collectors_hub: Dict[str, Any] = {}
 # Global notifier (singleton to persist _last_sent state)
 notifier: WeChatNotifier = None
+update_task: asyncio.Task | None = None
 
 async def perform_analysis():
     """Analyze current raw data from ALL exchanges (multi-user: frontend filters locally)."""
@@ -295,6 +372,8 @@ async def perform_analysis():
                 sym_data[key] = None
         markets_display[sym] = sym_data
         
+    annotate_entry_check_support(opportunities, collectors_hub)
+
     opp_display = []
     for opp in opportunities:
         total_net_bps = opp.details.get("total_net_bps", 0)
@@ -305,6 +384,7 @@ async def perform_analysis():
         funding_annual = funding_bps * (24 / base_interval) * 3.65 if base_interval > 0 else 0
         total_apr = funding_annual + (net_spread_bps / 100.0)
         
+        details = {**opp.details}
         opp_display.append({
             "symbol": opp.symbol,
             "direction": opp.direction,
@@ -312,7 +392,7 @@ async def perform_analysis():
             "total_net_bps": total_net_bps,
             "total_apr": total_apr,
             "base_interval": base_interval,
-            "details": opp.details,
+            "details": details,
         })
     
     # Sort by APR descending
@@ -337,9 +417,6 @@ async def update_data_loop():
         interval = settings.schedule.interval_seconds
         start_time = time.time()
         try:
-            # Record update timestamp at the START to reduce perceived lag
-            latest_data["last_update"] = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (Multi-Exchange Mode)"
-            
             # --- Batch Processing Optimization ---
             # Use asyncio.gather for parallel fetching while tracking health per collector
             async def fetch_with_health_tracking(key: str, collector):
@@ -347,11 +424,11 @@ async def update_data_loop():
                     res = await collector.fetch_markets(settings.tracked_symbols)
                     collector.last_fetch_time = time.time()
                     collector.last_error = None
-                    return key, res or {}
+                    return key, res or {}, None
                 except Exception as e:
                     collector.last_error = str(e)
                     logger.error(f"Exchange {key} fetch error: {e}")
-                    return key, {}
+                    return key, {}, str(e)
 
             all_keys = list(collectors_hub.keys())
             fetch_tasks = [
@@ -360,18 +437,21 @@ async def update_data_loop():
             ]
             results = await asyncio.gather(*fetch_tasks)
             
-            for key, data in results:
-                logger.info(f"Exchange {key} returned {len(data)} markets.")
-                if data:
-                    latest_data["raw_exchanges_data"][key] = data
-                elif key not in latest_data["raw_exchanges_data"]:
-                    latest_data["raw_exchanges_data"][key] = {}
-                else:
-                    logger.warning(
-                        "Exchange %s returned no data; keeping previous snapshot with %d markets.",
-                        key,
-                        len(latest_data["raw_exchanges_data"].get(key, {})),
-                    )
+            for key, data, error in results:
+                replace_exchange_snapshot(
+                    latest_data["raw_exchanges_data"],
+                    latest_data["exchange_status"],
+                    key=key,
+                    data=data,
+                    fetched_at=time.time(),
+                    error=error,
+                )
+                logger.info(
+                    "Exchange %s state=%s markets=%d.",
+                    key,
+                    latest_data["exchange_status"][key]["state"],
+                    len(data),
+                )
             
             # :55 快照 — 结算前 5 分钟内锁定当前费率
             update_pre_settlement_rates(latest_data["raw_exchanges_data"])
@@ -461,7 +541,26 @@ async def update_data_loop():
 
 @app.get("/api/data", response_model=DashboardData)
 async def get_dashboard_data():
-    return latest_data
+    return dashboard_snapshot(
+        latest_data,
+        market_stale_seconds=settings.schedule.market_stale_seconds,
+        now=time.time(),
+    )
+
+
+class EntryCheckRequest(BaseModel):
+    symbol: str = Field(..., min_length=1, max_length=32)
+    long_exchange: str = Field(..., min_length=1, max_length=32)
+    short_exchange: str = Field(..., min_length=1, max_length=32)
+
+
+@app.post("/api/entry-check")
+async def entry_check(request: EntryCheckRequest):
+    return await evaluate_manual_entry(
+        request.symbol.upper(),
+        request.long_exchange,
+        request.short_exchange,
+    )
 
 @app.get("/api/health")
 async def get_health():
@@ -478,7 +577,8 @@ async def get_health():
     return {
         "status": "healthy",
         "last_update": latest_data["last_update"],
-        "collectors": collectors_status
+        "collectors": collectors_status,
+        "exchange_status": latest_data["exchange_status"],
     }
 
 @app.get("/api/settings")
@@ -486,7 +586,8 @@ async def get_settings():
     return {
         "tracked_symbols": settings.tracked_symbols,
         "spread_threshold": settings.thresholds.min_spread_bps,
-        "interval": settings.schedule.interval_seconds
+        "interval": settings.schedule.interval_seconds,
+        "entry_check_notional_usd": settings.entry_check.notional_usd,
     }
 
 class ExchangeToggle(BaseModel):

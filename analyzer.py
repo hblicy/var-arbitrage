@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Dict, Iterable, List, Tuple
+import time
 
 from config import Settings, settings
 from models import ArbitrageOpportunity, MarketDatum
@@ -51,6 +52,9 @@ def analyse_markets(
                     continue
 
                 found_any_pair = True
+                if _is_stale_market(m_a, cfg) or _is_stale_market(m_b, cfg):
+                    reasons[sym] = "STALE_DATA"
+                    continue
                 # Safety: Ignore symbols with zero/missing prices (phantom data)
                 if m_a.price <= 0 or m_b.price <= 0:
                     reasons[sym] = "ZERO_PRICE"
@@ -104,6 +108,14 @@ def analyse_markets(
                 reasons[sym] = "NO_OPPORTUNITY"
 
     return opportunities, reasons, symbol_max_intervals
+
+
+def _is_stale_market(market: MarketDatum, cfg: Settings) -> bool:
+    max_age = getattr(getattr(cfg, "schedule", None), "market_stale_seconds", 0)
+    if not max_age:
+        return False
+    timestamp = market.timestamp
+    return timestamp is None or (time.time() - timestamp) > max_age
 
 
 def _passes_volume_filter(leg_a: MarketDatum, leg_b: MarketDatum, cfg: Settings) -> bool:

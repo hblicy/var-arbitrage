@@ -44,28 +44,30 @@ class GrvtCollector(MarketCollector):
 
     async def _fetch_all_instruments(self) -> List[str]:
         """Fetch all perpetual instruments from GRVT."""
-        try:
-            resp = await self._session.post("/full/v1/instruments", json={})
-            if resp.status_code == 200:
-                data = resp.json()
-                instruments = []
-                for item in data.get("result", []):
-                    if item.get("kind") == "PERPETUAL":
-                        inst_name = item["instrument"]
-                        instruments.append(inst_name)
-                        # Store funding interval (default to 8 if not specified)
-                        interval = item.get("funding_interval_hours", 8)
-                        self._instrument_intervals[inst_name] = interval
-                return instruments
-        except Exception as e:
-            logger.error(f"Error fetching GRVT instruments: {e}")
-        return []
+        resp = await self._session.post("/full/v1/instruments", json={})
+        if resp.status_code != 200:
+            raise RuntimeError(f"GRVT instruments request failed: HTTP {resp.status_code}")
+        data = resp.json()
+        if not isinstance(data, dict) or not isinstance(data.get("result"), list):
+            raise ValueError("GRVT returned invalid instruments payload")
+
+        instruments = []
+        intervals = {}
+        for item in data["result"]:
+            if item.get("kind") == "PERPETUAL":
+                inst_name = item["instrument"]
+                instruments.append(inst_name)
+                intervals[inst_name] = int(item.get("funding_interval_hours", 8))
+        self._instrument_intervals = intervals
+        return instruments
 
     async def fetch_markets(self, symbols: Iterable[str]) -> Dict[str, MarketDatum]:
         """Fetch market data for all instruments."""
         # Update instrument list every hour or if empty
         import time
-        if not self._instruments or (time.time() - self._last_instrument_fetch > 3600):
+        if not self._instruments or (
+            time.time() - self._last_instrument_fetch > self.settings.metadata_refresh_seconds
+        ):
             self._instruments = await self._fetch_all_instruments()
             self._last_instrument_fetch = time.time()
 

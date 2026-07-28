@@ -221,17 +221,35 @@ def estimate_position_pnl(
 #  :55 快照 → :01 结算
 # ══════════════════════════════════════════════════════════════════
 
-def _prev_settlement_utc(interval_h: int, utc_now: datetime) -> datetime:
+def _prev_settlement_utc(
+    interval_h: int,
+    utc_now: datetime,
+    next_funding_time: Optional[float] = None,
+) -> datetime:
     """计算上一个 UTC 对齐的结算整点。"""
     interval = max(interval_h, 1)
+    exchange_next = _parse_funding_time_utc(next_funding_time)
+    if exchange_next is not None:
+        while exchange_next <= utc_now:
+            exchange_next += timedelta(hours=interval)
+        return exchange_next - timedelta(hours=interval)
     hour = utc_now.hour
     prev_hour = (hour // interval) * interval
     return utc_now.replace(hour=prev_hour, minute=0, second=0, microsecond=0)
 
 
-def _next_settlement_utc(interval_h: int, utc_now: datetime) -> datetime:
+def _next_settlement_utc(
+    interval_h: int,
+    utc_now: datetime,
+    next_funding_time: Optional[float] = None,
+) -> datetime:
     """计算下一个 UTC 对齐的结算整点。"""
     interval = max(interval_h, 1)
+    exchange_next = _parse_funding_time_utc(next_funding_time)
+    if exchange_next is not None:
+        while exchange_next < utc_now:
+            exchange_next += timedelta(hours=interval)
+        return exchange_next
     hour = utc_now.hour
     next_hour = ((hour // interval) + 1) * interval
     result = utc_now.replace(minute=0, second=0, microsecond=0)
@@ -241,16 +259,34 @@ def _next_settlement_utc(interval_h: int, utc_now: datetime) -> datetime:
     return result.replace(hour=next_hour)
 
 
-def _is_snapshot_window(interval_h: int, utc_now: datetime) -> bool:
+def _parse_funding_time_utc(value: Optional[float]) -> Optional[datetime]:
+    if value is None:
+        return None
+    try:
+        from datetime import timezone
+        return datetime.fromtimestamp(float(value) / 1_000, tz=timezone.utc).replace(tzinfo=None)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _is_snapshot_window(
+    interval_h: int,
+    utc_now: datetime,
+    next_funding_time: Optional[float] = None,
+) -> bool:
     """判断当前是否处于结算前 5 分钟的快照窗口 (X:55 ~ X:00)。"""
-    next_settle = _next_settlement_utc(interval_h, utc_now)
+    next_settle = _next_settlement_utc(interval_h, utc_now, next_funding_time)
     minutes_until = (next_settle - utc_now).total_seconds() / 60
     return 0 < minutes_until <= 5
 
 
-def _is_settle_window(interval_h: int, utc_now: datetime) -> bool:
+def _is_settle_window(
+    interval_h: int,
+    utc_now: datetime,
+    next_funding_time: Optional[float] = None,
+) -> bool:
     """判断当前是否处于结算后 5 分钟的结算窗口 (X:00 ~ X:05)。"""
-    prev_settle = _prev_settlement_utc(interval_h, utc_now)
+    prev_settle = _prev_settlement_utc(interval_h, utc_now, next_funding_time)
     minutes_since = (utc_now - prev_settle).total_seconds() / 60
     return 0 <= minutes_since <= 5
 
@@ -311,7 +347,11 @@ def update_pre_settlement_rates(exchanges_data: Dict[str, Dict]) -> None:
                 pos_changed = True
 
             # ── 只在 :55 快照窗口内锁定 pre_settlement_rate ──
-            if _is_snapshot_window(interval_h, utc_now):
+            if _is_snapshot_window(
+                interval_h,
+                utc_now,
+                getattr(market, 'next_funding_time', None),
+            ):
                 snap_key = f"pre_settlement_rate_{leg}"
                 snap_time_key = f"snapshot_time_{leg}"
                 snap_interval_key = f"snapshot_interval_{leg}"
@@ -393,10 +433,11 @@ def accumulate_funding(
             last_key = f"last_settlement_{leg}"
 
             # ── 确定需要结算的周期列表 ──
-            prev_settle_utc = _prev_settlement_utc(interval_h, utc_now)
+            next_funding_time = getattr(market, 'next_funding_time', None)
+            prev_settle_utc = _prev_settlement_utc(interval_h, utc_now, next_funding_time)
             prev_settle_local = _utc_to_local_naive(prev_settle_utc)
 
-            in_settle_window = _is_settle_window(interval_h, utc_now)
+            in_settle_window = _is_settle_window(interval_h, utc_now, next_funding_time)
 
             # 解析上次结算时间 (local time)
             last_settle_str = pos.get(last_key, "")
@@ -430,7 +471,7 @@ def accumulate_funding(
                 periods_to_settle = [prev_settle_local]
             else:
                 periods_to_settle = []
-                cursor_utc = _prev_settlement_utc(interval_h, utc_now)
+                cursor_utc = _prev_settlement_utc(interval_h, utc_now, next_funding_time)
                 cursor_local = _utc_to_local_naive(cursor_utc)
 
                 check_local = prev_settle_local
