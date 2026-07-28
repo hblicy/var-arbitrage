@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import PositionsModal from './PositionsModal';
-import { getObservationDisplay, partitionOpportunities } from './opportunityViewModel';
+import {
+  getObservationDisplay,
+  partitionOpportunities,
+  selectBestReviewCandidates,
+} from './opportunityViewModel';
 
 const STORAGE_KEY = 'arbitrage_exchange_prefs';
 const MIN_EXCHANGES_REQUIRED = 2;
@@ -119,7 +123,8 @@ const entryCheckMessage = (entryCheck) => {
   return `不可开：${reason}`;
 };
 
-const entryCheckStatusLabel = (entryCheck) => {
+const entryCheckStatusLabel = (entryCheck, manualReview) => {
+  if (manualReview) return '需人工复核 Variational';
   if (!entryCheck) return '待实时复核';
   if (entryCheck.status === 'checking') return '正在复核';
   if (entryCheck.status === 'actionable') return '实时可开（2 秒）';
@@ -127,7 +132,7 @@ const entryCheckStatusLabel = (entryCheck) => {
   return '暂不可开';
 };
 
-const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity, entryCheck, onVerifyEntry }) {
+const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity, entryCheck, manualReview, onVerifyEntry }) {
   if (!opportunity) {
     return <div className="no-arb-hint">无有效组合</div>;
   }
@@ -184,18 +189,24 @@ const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity, entryChec
           <span>{formatSignedBps(fundingHourlyBps)} bps/h</span>
           <span>量 {formatVolume(buyVolume)} | {formatVolume(sellVolume)}</span>
         </div>
-        <div className={`execution-state ${entryCheck?.status || 'pending'}`}>
+        <div className={`execution-state ${manualReview ? 'manual' : entryCheck?.status || 'pending'}`}>
           <span className="execution-state-dot"></span>
-          {entryCheckStatusLabel(entryCheck)}
+          {entryCheckStatusLabel(entryCheck, manualReview)}
         </div>
-        <button
-          className="entry-check-btn"
-          onClick={() => onVerifyEntry(opportunity)}
-          disabled={entryCheck?.status === 'checking'}
-        >
-          {entryCheck?.status === 'checking' ? '复核中…' : '复核 1000 USDT/腿'}
-        </button>
-        {entryCheck && (
+        {manualReview ? (
+          <div className="entry-check-result manual">
+            请在 Variational 手工确认 1000 USDT 的实际可成交价后，再决定是否开仓。
+          </div>
+        ) : (
+          <button
+            className="entry-check-btn"
+            onClick={() => onVerifyEntry(opportunity)}
+            disabled={entryCheck?.status === 'checking'}
+          >
+            {entryCheck?.status === 'checking' ? '复核中…' : '复核 1000 USDT/腿'}
+          </button>
+        )}
+        {!manualReview && entryCheck && (
           <div className={`entry-check-result ${entryCheck.status === 'actionable' ? 'pass' : 'fail'}`}>
             {entryCheckMessage(entryCheck)}
           </div>
@@ -220,13 +231,13 @@ const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity, entryChec
 });
 
 const ObservationPool = React.memo(function ObservationPool({ opportunities }) {
-  const [showAll, setShowAll] = useState(false);
+  const [showAll, setShowAll] = useState(true);
   const { visible, hiddenCount } = getObservationDisplay(opportunities, showAll);
 
   if (opportunities.length === 0) return null;
 
   return (
-    <details className="observation-pool">
+    <details className="observation-pool" open>
       <summary>观察池 · {opportunities.length} 条不可复核路线</summary>
       <p>这些路线没有双边实时盘口，不能作为开仓候选；仅保留用于跟踪资金费和价差变化。</p>
       <div className="observation-list">
@@ -253,8 +264,9 @@ const ObservationPool = React.memo(function ObservationPool({ opportunities }) {
   );
 });
 
-const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, symbolMaxIntervals, entryChecks, onVerifyEntry }) {
+const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, symbolMaxIntervals, entryChecks, manualReviewKeys, onVerifyEntry }) {
   const { sym, delta, bestSymbolOpp, baseInterval } = row;
+  const manualReview = bestSymbolOpp && manualReviewKeys.has(entryCheckKey(bestSymbolOpp));
 
   return (
     <tr>
@@ -296,7 +308,7 @@ const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, sym
           {bestSymbolOpp ? (
             <>
               <span className="apr-yield">理论 {formatSignedPercent(calcProjected24hPercent(bestSymbolOpp))} <small>/24h</small></span>
-              <span className="bps-value">实时盘口复核前</span>
+              <span className="bps-value">{manualReview ? '需手工确认 Variational 盘口' : '实时盘口复核前'}</span>
             </>
           ) : (
             <>
@@ -310,6 +322,7 @@ const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, sym
           <ArbitrageCell
             opportunity={bestSymbolOpp}
             entryCheck={bestSymbolOpp ? entryChecks[entryCheckKey(bestSymbolOpp)] : null}
+            manualReview={manualReview}
             onVerifyEntry={onVerifyEntry}
           />
       </td>
@@ -465,22 +478,26 @@ function App() {
     () => partitionOpportunities(data.opportunities, enabledExchangeSet),
     [data.opportunities, enabledExchangeSet],
   );
-  const executableOpportunities = opportunityPools.executable;
+  const automaticOpportunities = opportunityPools.executable;
+  const manualOpportunities = opportunityPools.manual;
   const observationOpportunities = opportunityPools.observation;
+  const reviewOpportunities = useMemo(
+    () => [...automaticOpportunities, ...manualOpportunities],
+    [automaticOpportunities, manualOpportunities],
+  );
+  const manualReviewKeys = useMemo(
+    () => new Set(manualOpportunities.map(entryCheckKey)),
+    [manualOpportunities],
+  );
 
-  const bestOppBySymbol = useMemo(() => {
-    const map = new Map();
-
-    for (const opportunity of executableOpportunities) {
-      const key = opportunity.symbol.trim().toUpperCase();
-      const currentBest = map.get(key);
-      if (!currentBest || getOpportunityApr(opportunity) > getOpportunityApr(currentBest)) {
-        map.set(key, opportunity);
-      }
-    }
-
-    return map;
-  }, [executableOpportunities]);
+  const bestOppBySymbol = useMemo(
+    () => selectBestReviewCandidates(
+      automaticOpportunities,
+      manualOpportunities,
+      getOpportunityApr,
+    ),
+    [automaticOpportunities, manualOpportunities],
+  );
 
   const symbolsWithDelta = useMemo(() => {
     const symbolMaxIntervals = data.symbol_max_intervals || {};
@@ -525,8 +542,8 @@ function App() {
   const visibleSymbols = useMemo(() => sortedSymbols.slice(0, 100), [sortedSymbols]);
   const lastUpdateText = useMemo(() => formatLastUpdate(data.last_update), [data.last_update]);
   const totalMarkets = symbolsWithDelta.length;
-  const oppCount = executableOpportunities.length;
-  const actionableCount = executableOpportunities.reduce((count, opportunity) => (
+  const oppCount = reviewOpportunities.length;
+  const actionableCount = automaticOpportunities.reduce((count, opportunity) => (
     entryChecks[entryCheckKey(opportunity)]?.status === 'actionable' ? count + 1 : count
   ), 0);
   const unavailableExchanges = Object.entries(data.exchange_status)
@@ -581,7 +598,7 @@ function App() {
           <div className="stat-value">{totalMarkets}</div>
         </div>
         <div className="stats-card">
-          <div className="stat-label">待复核路线</div>
+          <div className="stat-label">待复核候选</div>
           <div className="stat-value highlight">{oppCount}</div>
         </div>
         <div className="stats-card">
@@ -598,7 +615,7 @@ function App() {
               <th className="col-asset">币种</th>
               {exchanges.map(ex => <th key={ex}>{formatExchangeName(ex)}</th>)}
               <th className="col-gap">执行评估</th>
-              <th className="col-action">可复核候选</th>
+              <th className="col-action">执行候选</th>
             </tr>
           </thead>
           <tbody>
@@ -611,13 +628,14 @@ function App() {
                   exchanges={exchanges}
                   symbolMaxIntervals={data.symbol_max_intervals}
                   entryChecks={entryChecks}
+                  manualReviewKeys={manualReviewKeys}
                   onVerifyEntry={verifyEntry}
                 />
               ))
             ) : (
               <tr>
                 <td className="candidate-empty" colSpan={exchanges.length + 3}>
-                  暂无可复核候选；不可复核路线已放入下方观察池。
+                  暂无待复核候选；其他不可复核路线已放入下方观察池。
                 </td>
               </tr>
             )}
