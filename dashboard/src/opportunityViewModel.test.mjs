@@ -34,6 +34,49 @@ test('places routes without two-sided depth into the observation pool', () => {
   assert.deepEqual(result.observation, [observation]);
 });
 
+test('places the Binance and Variational route into manual review candidates', () => {
+  const manualReview = {
+    symbol: 'DEXEUSDT',
+    direction: 'binance_long_variational_short',
+    details: {
+      buy_exchange: 'binance',
+      sell_exchange: 'variational',
+      entry_check_supported: false,
+    },
+  };
+
+  const result = partitionOpportunities(
+    [manualReview],
+    new Set(['binance', 'variational']),
+  );
+
+  assert.deepEqual(result.manual, [manualReview]);
+  assert.deepEqual(result.observation, []);
+});
+
+test('prioritizes Binance and Variational over higher-return automatic routes for the same symbol', () => {
+  const automatic = {
+    symbol: 'BTCUSDT',
+    details: {
+      projected_24h_bps: 300,
+    },
+  };
+  const manual = {
+    symbol: 'BTCUSDT',
+    details: {
+      projected_24h_bps: 100,
+    },
+  };
+
+  const result = opportunityViewModel.selectBestReviewCandidates(
+    [automatic],
+    [manual],
+    (opportunity) => opportunity.details.projected_24h_bps,
+  );
+
+  assert.equal(result.get('BTCUSDT'), manual);
+});
+
 test('excludes routes containing disabled exchanges from both pools', () => {
   const result = partitionOpportunities([
     {
@@ -46,7 +89,7 @@ test('excludes routes containing disabled exchanges from both pools', () => {
     },
   ], new Set(['binance']));
 
-  assert.deepEqual(result, { executable: [], observation: [] });
+  assert.deepEqual(result, { executable: [], manual: [], observation: [] });
 });
 
 test('reports every hidden observation route before the user expands the pool', () => {
@@ -62,4 +105,15 @@ test('reports every hidden observation route before the user expands the pool', 
   const expanded = opportunityViewModel.getObservationDisplay(opportunities, true);
   assert.equal(expanded.visible.length, 21);
   assert.equal(expanded.hiddenCount, 0);
+});
+
+test('shows every observation route by default', () => {
+  const opportunities = Array.from({ length: 21 }, (_, index) => ({
+    symbol: `TOKEN${index}USDT`,
+  }));
+
+  const display = opportunityViewModel.getObservationDisplay(opportunities);
+
+  assert.equal(display.visible.length, 21);
+  assert.equal(display.hiddenCount, 0);
 });
