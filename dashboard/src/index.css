@@ -1399,3 +1399,194 @@ tbody tr:hover {
   font-size: 0.85rem;
   margin-bottom: 8px;
 }
+
+.stale-banner {
+  margin: 0 24px 16px;
+  padding: 10px 14px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  border-radius: 8px;
+  color: #fcd34d;
+  background: rgba(146, 64, 14, 0.18);
+  font-size: 0.82rem;
+}
+
+.entry-check-btn {
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  border-radius: 6px;
+  color: #bae6fd;
+  background: rgba(14, 116, 144, 0.18);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.entry-check-btn:hover:not(:disabled) {
+  background: rgba(14, 116, 144, 0.38);
+}
+
+.entry-check-btn:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.entry-check-result {
+  margin-top: 6px;
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.entry-check-result.pass {
+  color: #86efac;
+}
+
+.entry-check-result.fail {
+  color: #fbbf24;
+}
+
+.execution-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+.execution-state-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #facc15;
+}
+
+.execution-state.checking .execution-state-dot {
+  background: #38bdf8;
+  animation: execution-pulse 1s ease-in-out infinite;
+}
+
+.execution-state.actionable {
+  color: #86efac;
+}
+
+.execution-state.actionable .execution-state-dot {
+  background: #22c55e;
+}
+
+.execution-state.unavailable,
+.execution-state.expired {
+  color: #fbbf24;
+}
+
+.execution-state.unavailable .execution-state-dot,
+.execution-state.expired .execution-state-dot {
+  background: #f59e0b;
+}
+
+@keyframes execution-pulse {
+  50% { opacity: 0.35; }
+}
+
+.observation-gap {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.candidate-empty {
+  padding: 34px 16px;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  text-align: center;
+}
+
+.observation-pool {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.observation-pool summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.observation-pool p {
+  margin: 10px 0 12px;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.observation-list {
+  display: grid;
+  gap: 6px;
+}
+
+.observation-row {
+  display: grid;
+  grid-template-columns: minmax(58px, 0.65fr) minmax(180px, 2fr) minmax(130px, 1.1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: rgba(30, 41, 59, 0.35);
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+}
+
+.observation-symbol {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.observation-yield {
+  color: #cbd5e1;
+}
+
+.observation-status {
+  color: #fbbf24;
+  font-size: 0.7rem;
+}
+
+.observation-toggle {
+  margin-top: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent-color);
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.observation-toggle:hover {
+  border-color: var(--accent-color);
+}
+
+@media (max-width: 768px) {
+  .observation-pool {
+    margin-top: 12px;
+  }
+
+  .observation-row {
+    grid-template-columns: 1fr auto;
+    gap: 6px 10px;
+  }
+
+  .observation-yield {
+    grid-column: 1;
+  }
+
+  .observation-status {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    text-align: right;
+  }
+}

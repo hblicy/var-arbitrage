@@ -40,7 +40,7 @@ class BackpackCollector(MarketCollector):
         
         return None
 
-    @with_retry(max_retries=3, backoff_base=2, default_return={})
+    @with_retry(max_retries=3, backoff_base=2)
     async def fetch_markets(self, symbols: Iterable[str]) -> Dict[str, MarketDatum]:
         """Fetch prices and funding rates from Backpack public API."""
         symbol_list = list(symbols)

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import PositionsModal from './PositionsModal';
+import { getObservationDisplay, partitionOpportunities } from './opportunityViewModel';
 
 const STORAGE_KEY = 'arbitrage_exchange_prefs';
 const MIN_EXCHANGES_REQUIRED = 2;
@@ -10,6 +11,7 @@ const EMPTY_DASHBOARD_DATA = {
   opportunities: [],
   reasons: {},
   symbol_max_intervals: {},
+  exchange_status: {},
   last_update: 'Loading...',
   data_version: 0,
 };
@@ -21,6 +23,7 @@ const normalizeDashboardData = (json) => ({
   opportunities: Array.isArray(json?.opportunities) ? json.opportunities : [],
   reasons: json?.reasons || {},
   symbol_max_intervals: json?.symbol_max_intervals || {},
+  exchange_status: json?.exchange_status || {},
   data_version: Number(json?.data_version || 0),
 });
 
@@ -29,6 +32,10 @@ const getDashboardSignature = (item) => [
   item.last_update,
   Object.keys(item.markets || {}).length,
   (item.opportunities || []).length,
+  Object.entries(item.exchange_status || {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}:${value.state}:${value.last_success_at || ''}`)
+    .join(','),
 ].join('|');
 
 const EXCHANGE_LABELS = {
@@ -92,7 +99,35 @@ const opportunityTypeLabel = (type) => ({
   watch: '观察',
 }[type] || '观察');
 
-const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity }) {
+const entryCheckKey = (opportunity) => `${opportunity.symbol}:${opportunity.direction}`;
+
+const entryCheckMessage = (entryCheck) => {
+  if (!entryCheck) return null;
+  if (entryCheck.status === 'checking') return '正在获取双边深度盘口…';
+  if (entryCheck.status === 'actionable') {
+    return `可人工开仓：收敛净空间 ${formatSignedBps(entryCheck.net_convergence_bps)} bps，安全余量 ${formatSignedBps(entryCheck.safety_margin_bps)} bps（2 秒内有效）`;
+  }
+  if (entryCheck.status === 'expired') return '复核报价已过期，请重新复核。';
+  const reason = {
+    DEPTH_UNSUPPORTED: '该交易所组合暂不支持深度复核，只能观察。',
+    INSUFFICIENT_DEPTH: '1000 USDT 单腿的盘口深度不足。',
+    INSUFFICIENT_EDGE: '扣除往返手续费和安全垫后，收敛空间不足。',
+    STALE_QUOTE: '报价已过期。',
+    LEG_SKEW: '两边报价时间差过大。',
+    QUOTE_FETCH_FAILED: '实时盘口获取失败。',
+  }[entryCheck.reason] || '暂不可人工开仓。';
+  return `不可开：${reason}`;
+};
+
+const entryCheckStatusLabel = (entryCheck) => {
+  if (!entryCheck) return '待实时复核';
+  if (entryCheck.status === 'checking') return '正在复核';
+  if (entryCheck.status === 'actionable') return '实时可开（2 秒）';
+  if (entryCheck.status === 'expired') return '报价已过期';
+  return '暂不可开';
+};
+
+const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity, entryCheck, onVerifyEntry }) {
   if (!opportunity) {
     return <div className="no-arb-hint">无有效组合</div>;
   }
@@ -132,7 +167,7 @@ const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity }) {
         <div className={`setup-badge ${setupType}`}>{opportunityTypeLabel(setupType)}</div>
         <div className="arb-total-yield">
           {formatSignedPercent(projected24hPercent)}
-          <small>&nbsp; 24h估算</small>
+          <small>&nbsp; 理论 24h</small>
         </div>
         <div className="arb-metrics">
           <span className={priceBps >= 0 ? 'metric-good' : 'metric-bad'}>
@@ -149,6 +184,22 @@ const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity }) {
           <span>{formatSignedBps(fundingHourlyBps)} bps/h</span>
           <span>量 {formatVolume(buyVolume)} | {formatVolume(sellVolume)}</span>
         </div>
+        <div className={`execution-state ${entryCheck?.status || 'pending'}`}>
+          <span className="execution-state-dot"></span>
+          {entryCheckStatusLabel(entryCheck)}
+        </div>
+        <button
+          className="entry-check-btn"
+          onClick={() => onVerifyEntry(opportunity)}
+          disabled={entryCheck?.status === 'checking'}
+        >
+          {entryCheck?.status === 'checking' ? '复核中…' : '复核 1000 USDT/腿'}
+        </button>
+        {entryCheck && (
+          <div className={`entry-check-result ${entryCheck.status === 'actionable' ? 'pass' : 'fail'}`}>
+            {entryCheckMessage(entryCheck)}
+          </div>
+        )}
         {(hasMismatch || opportunity.details.suggest_limit_order) && (
           <div className="arb-badges">
             {hasMismatch && (
@@ -168,8 +219,42 @@ const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity }) {
   );
 });
 
-const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, symbolMaxIntervals }) {
-  const { sym, delta, bestSymbolOpp, baseInterval, dailyYield } = row;
+const ObservationPool = React.memo(function ObservationPool({ opportunities }) {
+  const [showAll, setShowAll] = useState(false);
+  const { visible, hiddenCount } = getObservationDisplay(opportunities, showAll);
+
+  if (opportunities.length === 0) return null;
+
+  return (
+    <details className="observation-pool">
+      <summary>观察池 · {opportunities.length} 条不可复核路线</summary>
+      <p>这些路线没有双边实时盘口，不能作为开仓候选；仅保留用于跟踪资金费和价差变化。</p>
+      <div className="observation-list">
+        {visible.map((opportunity) => (
+          <div className="observation-row" key={`${opportunity.symbol}:${opportunity.direction}`}>
+            <span className="observation-symbol">{opportunity.symbol.replace('USDT', '')}</span>
+            <span>{formatExchangeName(opportunity.details.buy_exchange)} 多 → {formatExchangeName(opportunity.details.sell_exchange)} 空</span>
+            <span className="observation-yield">理论 24h {formatSignedPercent(calcProjected24hPercent(opportunity))}</span>
+            <span className="observation-status">缺少双边盘口</span>
+          </div>
+        ))}
+      </div>
+      {hiddenCount > 0 && (
+        <button className="observation-toggle" type="button" onClick={() => setShowAll(true)}>
+          展开其余 {hiddenCount} 条观察路线
+        </button>
+      )}
+      {showAll && opportunities.length > 20 && (
+        <button className="observation-toggle" type="button" onClick={() => setShowAll(false)}>
+          收起至前 20 条
+        </button>
+      )}
+    </details>
+  );
+});
+
+const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, symbolMaxIntervals, entryChecks, onVerifyEntry }) {
+  const { sym, delta, bestSymbolOpp, baseInterval } = row;
 
   return (
     <tr>
@@ -208,12 +293,25 @@ const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, sym
       })}
       <td className="gap-cell">
         <div className="gap-value">
-          <span className={`apr-yield ${dailyYield > 2 ? 'glow' : ''}`}>{dailyYield.toFixed(2)}% <small>/天</small></span>
-          <span className="bps-value">{delta.toFixed(1)} bps / {baseInterval}h</span>
+          {bestSymbolOpp ? (
+            <>
+              <span className="apr-yield">理论 {formatSignedPercent(calcProjected24hPercent(bestSymbolOpp))} <small>/24h</small></span>
+              <span className="bps-value">实时盘口复核前</span>
+            </>
+          ) : (
+            <>
+              <span className="observation-gap">仅观察</span>
+              <span className="bps-value">资金费差 {delta.toFixed(1)} bps / {baseInterval}h</span>
+            </>
+          )}
         </div>
       </td>
       <td>
-        <ArbitrageCell opportunity={bestSymbolOpp} />
+          <ArbitrageCell
+            opportunity={bestSymbolOpp}
+            entryCheck={bestSymbolOpp ? entryChecks[entryCheckKey(bestSymbolOpp)] : null}
+            onVerifyEntry={onVerifyEntry}
+          />
       </td>
     </tr>
   );
@@ -222,6 +320,7 @@ const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, sym
 function App() {
   const [data, setData] = useState(EMPTY_DASHBOARD_DATA);
   const [exchangeStates, setExchangeStates] = useState([]);
+  const [entryChecks, setEntryChecks] = useState({});
   const [error, setError] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const isModalOpenRef = useRef(false);
@@ -324,6 +423,34 @@ function App() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
   };
 
+  const verifyEntry = useCallback(async (opportunity) => {
+    const key = entryCheckKey(opportunity);
+    setEntryChecks(prev => ({ ...prev, [key]: { status: 'checking' } }));
+    try {
+      const response = await fetch('/api/entry-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: opportunity.symbol,
+          long_exchange: opportunity.details.buy_exchange,
+          short_exchange: opportunity.details.sell_exchange,
+        }),
+      });
+      if (!response.ok) throw new Error('entry check failed');
+      const result = await response.json();
+      setEntryChecks(prev => ({ ...prev, [key]: result }));
+      if (result.status === 'actionable') {
+        window.setTimeout(() => {
+          setEntryChecks(prev => (
+            prev[key] === result ? { ...prev, [key]: { status: 'expired' } } : prev
+          ));
+        }, 2000);
+      }
+    } catch {
+      setEntryChecks(prev => ({ ...prev, [key]: { status: 'unavailable', reason: 'QUOTE_FETCH_FAILED' } }));
+    }
+  }, []);
+
   const allPossibleExchanges = useMemo(
     () => exchangeStates.length > 0 ? exchangeStates.map(ex => ex.name) : DEFAULT_EXCHANGES,
     [exchangeStates]
@@ -334,25 +461,26 @@ function App() {
   );
   const enabledExchangeSet = useMemo(() => new Set(enabledExchanges), [enabledExchanges]);
   const exchanges = enabledExchanges;
+  const opportunityPools = useMemo(
+    () => partitionOpportunities(data.opportunities, enabledExchangeSet),
+    [data.opportunities, enabledExchangeSet],
+  );
+  const executableOpportunities = opportunityPools.executable;
+  const observationOpportunities = opportunityPools.observation;
 
   const bestOppBySymbol = useMemo(() => {
     const map = new Map();
 
-    for (const opportunity of data.opportunities) {
-      if (
-        enabledExchangeSet.has(opportunity.details.buy_exchange?.toLowerCase()) &&
-        enabledExchangeSet.has(opportunity.details.sell_exchange?.toLowerCase())
-      ) {
-        const key = opportunity.symbol.trim().toUpperCase();
-        const currentBest = map.get(key);
-        if (!currentBest || getOpportunityApr(opportunity) > getOpportunityApr(currentBest)) {
-          map.set(key, opportunity);
-        }
+    for (const opportunity of executableOpportunities) {
+      const key = opportunity.symbol.trim().toUpperCase();
+      const currentBest = map.get(key);
+      if (!currentBest || getOpportunityApr(opportunity) > getOpportunityApr(currentBest)) {
+        map.set(key, opportunity);
       }
     }
 
     return map;
-  }, [data.opportunities, enabledExchangeSet]);
+  }, [executableOpportunities]);
 
   const symbolsWithDelta = useMemo(() => {
     const symbolMaxIntervals = data.symbol_max_intervals || {};
@@ -384,33 +512,28 @@ function App() {
       }
 
       const delta = rateCount > 1 ? (maxRate - minRate) * 10000 : 0;
-      const dailyYield = delta * (24 / baseInterval) / 100;
-      const bestDailyYieldPercent = bestSymbolOpp ? calcProjected24hPercent(bestSymbolOpp) : dailyYield;
-      const bestDailyYieldBps = bestSymbolOpp ? bestDailyYieldPercent * 100 : null;
-
-      return { sym, delta, bestSymbolOpp, baseInterval, dailyYield, bestDailyYieldPercent, bestDailyYieldBps };
+      return { sym, delta, bestSymbolOpp, baseInterval };
     });
   }, [data.markets, data.symbol_max_intervals, bestOppBySymbol, exchanges]);
 
   const sortedSymbols = useMemo(() => {
-    return [...symbolsWithDelta].sort((a, b) => {
-      const getYield = (item) => {
-        if (item.bestSymbolOpp) return getOpportunityApr(item.bestSymbolOpp) / 365 || 0;
-        return item.dailyYield;
-      };
-      const yieldA = getYield(a);
-      const yieldB = getYield(b);
-
-      if (Math.abs(yieldA - yieldB) > 0.001) return yieldB - yieldA;
-      if (b.delta !== a.delta) return b.delta - a.delta;
-      return a.sym.localeCompare(b.sym);
-    });
+    return symbolsWithDelta
+      .filter((item) => item.bestSymbolOpp)
+      .sort((a, b) => getOpportunityApr(b.bestSymbolOpp) - getOpportunityApr(a.bestSymbolOpp));
   }, [symbolsWithDelta]);
 
   const visibleSymbols = useMemo(() => sortedSymbols.slice(0, 100), [sortedSymbols]);
   const lastUpdateText = useMemo(() => formatLastUpdate(data.last_update), [data.last_update]);
   const totalMarkets = symbolsWithDelta.length;
-  const oppCount = data.opportunities.length;
+  const oppCount = executableOpportunities.length;
+  const actionableCount = executableOpportunities.reduce((count, opportunity) => (
+    entryChecks[entryCheckKey(opportunity)]?.status === 'actionable' ? count + 1 : count
+  ), 0);
+  const unavailableExchanges = Object.entries(data.exchange_status)
+    .filter(([, value]) => value.state !== 'fresh')
+    .map(([key, value]) => `${formatExchangeName(key)}（${
+      value.state === 'error' ? '抓取失败' : value.state === 'stale' ? '行情过期' : '无行情'
+    }）`);
 
   return (
     <div className="app-container">
@@ -445,7 +568,12 @@ function App() {
         </div>
       </header>
 
-      {error && <div className="error-banner">{error}</div>}
+        {error && <div className="error-banner">{error}</div>}
+        {unavailableExchanges.length > 0 && (
+          <div className="stale-banner">
+            已排除：{unavailableExchanges.join('、')}；不会沿用旧行情计算机会。
+          </div>
+        )}
 
       <div className="stats-grid">
         <div className="stats-card">
@@ -453,29 +581,13 @@ function App() {
           <div className="stat-value">{totalMarkets}</div>
         </div>
         <div className="stats-card">
-          <div className="stat-label">计算路线</div>
+          <div className="stat-label">待复核路线</div>
           <div className="stat-value highlight">{oppCount}</div>
         </div>
         <div className="stats-card">
-          <div className="stat-label">最佳24h收益</div>
-          <div className="stat-value highlight-green">
-            {sortedSymbols.length > 0
-              ? sortedSymbols[0].bestSymbolOpp
-                ? `${sortedSymbols[0].bestDailyYieldPercent.toFixed(2)}%`
-                : sortedSymbols[0].dailyYield > 0
-                  ? `${sortedSymbols[0].dailyYield.toFixed(2)}%`
-                  : '-'
-              : '-'}
-          </div>
-          <div className="stat-sub">
-            {sortedSymbols.length > 0
-              ? sortedSymbols[0].bestSymbolOpp
-                ? `${sortedSymbols[0].sym}（24h估算：${sortedSymbols[0].bestDailyYieldBps.toFixed(1)} bps）`
-                : sortedSymbols[0].dailyYield > 0
-                  ? `${sortedSymbols[0].sym}（仅资金费）`
-                  : '暂无机会'
-              : '暂无机会'}
-          </div>
+          <div className="stat-label">实时可开</div>
+          <div className={`stat-value ${actionableCount > 0 ? 'highlight-green' : ''}`}>{actionableCount}</div>
+          <div className="stat-sub">通过 1000 USDT/腿实时盘口复核</div>
         </div>
       </div>
 
@@ -485,23 +597,35 @@ function App() {
             <tr>
               <th className="col-asset">币种</th>
               {exchanges.map(ex => <th key={ex}>{formatExchangeName(ex)}</th>)}
-              <th className="col-gap">资金费差</th>
-              <th className="col-action">套利方向</th>
+              <th className="col-gap">执行评估</th>
+              <th className="col-action">可复核候选</th>
             </tr>
           </thead>
           <tbody>
-            {visibleSymbols.map((row) => (
-              <MarketRow
-                key={row.sym}
-                row={row}
-                marketSet={data.markets[row.sym]}
-                exchanges={exchanges}
-                symbolMaxIntervals={data.symbol_max_intervals}
-              />
-            ))}
+            {visibleSymbols.length > 0 ? (
+              visibleSymbols.map((row) => (
+                <MarketRow
+                  key={row.sym}
+                  row={row}
+                  marketSet={data.markets[row.sym]}
+                  exchanges={exchanges}
+                  symbolMaxIntervals={data.symbol_max_intervals}
+                  entryChecks={entryChecks}
+                  onVerifyEntry={verifyEntry}
+                />
+              ))
+            ) : (
+              <tr>
+                <td className="candidate-empty" colSpan={exchanges.length + 3}>
+                  暂无可复核候选；不可复核路线已放入下方观察池。
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
+
+      <ObservationPool opportunities={observationOpportunities} />
 
       <PositionsModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
     </div>

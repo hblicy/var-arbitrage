@@ -3,9 +3,11 @@ var-arbitrage 回归测试
 覆盖审计发现的中危/低危 bug 修复验证
 """
 import sys
+import time
 import unittest
-from unittest.mock import MagicMock, patch
-from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 sys.path.insert(0, r'd:\code-web3\DEX\var-arbitrage_v1.6')
 
@@ -31,6 +33,21 @@ class TestAuthBehavior(unittest.TestCase):
 
         self.assertEqual(ctx.exception.status_code, 401)
         self.assertNotIn("WWW-Authenticate", ctx.exception.headers or {})
+
+
+class TestApplicationLifespan(unittest.IsolatedAsyncioTestCase):
+    async def test_lifespan_runs_startup_and_shutdown(self):
+        import api
+
+        with (
+            patch.object(api, "startup_event", new_callable=AsyncMock) as startup,
+            patch.object(api, "shutdown_event", new_callable=AsyncMock) as shutdown,
+        ):
+            async with api.lifespan(api.app):
+                startup.assert_awaited_once()
+                shutdown.assert_not_awaited()
+
+        shutdown.assert_awaited_once()
 
 
 class MockConfig:
@@ -704,7 +721,550 @@ class TestAnalyzerExecutableSpread(unittest.TestCase):
 
         self.assertIn("资金费覆盖价差", content)
         self.assertIn("覆盖时间：约 11.4 小时", content)
-        self.assertIn("24h估算：+24.7178%", content)
+        self.assertIn("24h假设收敛估算：+24.7178%", content)
+
+    def test_notification_requires_manual_depth_recheck(self):
+        opp = ArbitrageOpportunity(
+            symbol="BTCUSDT",
+            direction="binance_long_aster_short",
+            entry_exchange="binance",
+            exit_exchange="aster",
+            gross_spread_bps=50.0,
+            net_spread_bps=40.0,
+            funding_diff=0.0,
+            recommendation="WATCH",
+            details={
+                "buy_exchange": "binance",
+                "sell_exchange": "aster",
+                "native_intervals": {"buy": 8, "sell": 8},
+            },
+        )
+
+        content = _format_text([opp])
+
+        self.assertIn("不是开仓指令", content)
+        self.assertIn("1000 USDT/腿", content)
+
+
+class TestMarketFreshness(unittest.TestCase):
+    class FreshnessConfig:
+        class thresholds:
+            dashboard_min_spread_bps = -9999
+            dashboard_min_funding_bps = -9999
+            dashboard_min_total_bps = -9999
+            dashboard_max_cover_hours = 24
+            max_price_deviation_pct = 100
+            min_volume_usd = 0
+
+        class fees:
+            slippage_bps = 0.0
+
+        class schedule:
+            market_stale_seconds = 2
+
+        class Ex:
+            taker_bps = 0.0
+
+        exchanges = {"buyex": Ex(), "sellex": Ex()}
+
+    def test_stale_market_data_is_excluded_from_opportunities(self):
+        stale_at = time.time() - 3
+        markets = {
+            "buyex": {
+                "BTCUSDT": MarketDatum(
+                    symbol="BTCUSDT",
+                    price=100.0,
+                    funding_rate=0.0,
+                    volume_24h=1_000_000,
+                    timestamp=stale_at,
+                    exchange="buyex",
+                    best_bid=99.9,
+                    best_ask=100.0,
+                )
+            },
+            "sellex": {
+                "BTCUSDT": MarketDatum(
+                    symbol="BTCUSDT",
+                    price=101.0,
+                    funding_rate=0.0,
+                    volume_24h=1_000_000,
+                    timestamp=stale_at,
+                    exchange="sellex",
+                    best_bid=101.0,
+                    best_ask=101.1,
+                )
+            },
+        }
+
+        opportunities, reasons, _ = analyse_markets(["BTCUSDT"], markets, self.FreshnessConfig())
+
+        self.assertEqual(opportunities, [])
+        self.assertEqual(reasons["BTCUSDT"], "STALE_DATA")
+
+
+class TestBinanceFundingIntervalRefresh(unittest.IsolatedAsyncioTestCase):
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    class ChangingFundingInfoClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def get(self, path):
+            self.calls += 1
+            self.assertEqual(path, "/fapi/v1/fundingInfo")
+            interval = 8 if self.calls == 1 else 4
+            return TestBinanceFundingIntervalRefresh.FakeResponse([
+                {"symbol": "BTCUSDT", "fundingIntervalHours": interval},
+            ])
+
+        def assertEqual(self, left, right):
+            if left != right:
+                raise AssertionError(f"{left!r} != {right!r}")
+
+    async def test_refreshes_changed_interval_without_hour_long_delay(self):
+        from collectors.binance import BinanceCollector
+
+        collector = BinanceCollector(Settings().binance)
+        collector.settings.metadata_refresh_seconds = 0
+        collector._client = self.ChangingFundingInfoClient()
+
+        await collector._refresh_intervals()
+        await collector._refresh_intervals()
+
+        self.assertEqual(collector._interval_map["BTCUSDT"], 4)
+
+
+class TestEntryQuoteEvaluation(unittest.TestCase):
+    def test_actionable_entry_requires_depth_and_keeps_safety_buffer(self):
+        from entry_check import evaluate_entry_quote
+
+        result = evaluate_entry_quote(
+            buy_book={"asks": [[100.0, 20.0]], "bids": [[99.9, 20.0]]},
+            sell_book={"asks": [[101.6, 20.0]], "bids": [[101.5, 20.0]]},
+            notional_usd=1_000.0,
+            buy_fee_bps=5.0,
+            sell_fee_bps=5.0,
+            safety_buffer_bps=20.0,
+            buy_quoted_at=1_000.0,
+            sell_quoted_at=1_000.2,
+            checked_at=1_000.5,
+            max_quote_age_ms=2_000,
+            max_leg_skew_ms=1_000,
+        )
+
+        self.assertEqual(result["status"], "actionable")
+        self.assertGreaterEqual(result["net_convergence_bps"], 20.0)
+        self.assertEqual(result["hedge_quantity"], 1000.0 / 101.5)
+
+
+class TestMarketSnapshotState(unittest.TestCase):
+    def test_failed_fetch_replaces_old_snapshot_and_marks_exchange_error(self):
+        from market_state import replace_exchange_snapshot
+
+        raw_exchanges_data = {"binance": {"BTCUSDT": object()}}
+        exchange_status = {}
+
+        replace_exchange_snapshot(
+            raw_exchanges_data,
+            exchange_status,
+            key="binance",
+            data={},
+            fetched_at=1_000.0,
+            error="upstream timeout",
+        )
+
+        self.assertEqual(raw_exchanges_data["binance"], {})
+        self.assertEqual(exchange_status["binance"]["state"], "error")
+        self.assertEqual(exchange_status["binance"]["market_count"], 0)
+
+
+class TestExchangeSettlementTimestamp(unittest.TestCase):
+    def test_uses_exchange_next_funding_time_instead_of_utc_grid(self):
+        from position_tracker import _next_settlement_utc
+
+        now = datetime(2026, 7, 28, 1, 56)
+        exchange_next = datetime(2026, 7, 28, 2, 0, tzinfo=timezone.utc).timestamp() * 1_000
+
+        result = _next_settlement_utc(8, now, next_funding_time=exchange_next)
+
+        self.assertEqual(result, datetime(2026, 7, 28, 2, 0))
+
+
+class TestDepthQuoteCollectors(unittest.IsolatedAsyncioTestCase):
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "bids": [["101.5", "20"]],
+                "asks": [["100.0", "20"]],
+            }
+
+    class FakeClient:
+        async def get(self, path, params=None):
+            if path != "/fapi/v1/depth":
+                raise AssertionError(f"unexpected path: {path}")
+            if params != {"symbol": "BTCUSDT", "limit": 100}:
+                raise AssertionError(f"unexpected params: {params}")
+            return TestDepthQuoteCollectors.FakeResponse()
+
+    async def test_binance_fetches_depth_for_pre_trade_check(self):
+        from collectors.binance import BinanceCollector
+
+        collector = BinanceCollector(Settings().binance)
+        collector._client = self.FakeClient()
+
+        book = await collector.fetch_order_book("BTCUSDT", 100)
+
+        self.assertEqual(book["bids"], [[101.5, 20.0]])
+        self.assertEqual(book["asks"], [[100.0, 20.0]])
+
+    async def test_aster_fetches_depth_for_pre_trade_check(self):
+        from collectors.aster import AsterCollector
+
+        collector = AsterCollector(Settings().aster)
+        collector._client = self.FakeClient()
+
+        book = await collector.fetch_order_book("BTCUSDT", 100)
+
+        self.assertEqual(book["bids"], [[101.5, 20.0]])
+        self.assertEqual(book["asks"], [[100.0, 20.0]])
+
+
+class TestManualEntryCheck(unittest.IsolatedAsyncioTestCase):
+    class FakeDepthCollector:
+        def __init__(self, book):
+            self.book = book
+
+        async def fetch_order_book(self, _symbol, _limit):
+            return self.book
+
+    async def test_manual_entry_check_uses_configured_one_leg_notional(self):
+        from api import evaluate_manual_entry
+        import api
+
+        buy = self.FakeDepthCollector({"asks": [[100.0, 20.0]], "bids": [[99.9, 20.0]]})
+        sell = self.FakeDepthCollector({"asks": [[101.6, 20.0]], "bids": [[101.5, 20.0]]})
+        original_hub = api.collectors_hub
+        api.collectors_hub = {"binance": buy, "aster": sell}
+        try:
+            result = await evaluate_manual_entry("BTCUSDT", "binance", "aster")
+        finally:
+            api.collectors_hub = original_hub
+
+        self.assertEqual(result["status"], "actionable")
+        self.assertEqual(result["notional_usd"], 1_000.0)
+        self.assertEqual(result["long_exchange"], "binance")
+        self.assertEqual(result["short_exchange"], "aster")
+
+
+class TestCollectorFailures(unittest.IsolatedAsyncioTestCase):
+    class FailingClient:
+        async def get(self, *_args, **_kwargs):
+            raise RuntimeError("upstream timeout")
+
+    async def test_fetch_error_is_reported_to_the_api_loop(self):
+        from collectors.aster import AsterCollector
+
+        collector = AsterCollector(Settings().aster)
+        collector._client = self.FailingClient()
+
+        with self.assertRaises(RuntimeError):
+            await collector.fetch_markets([])
+
+
+class TestFundingMetadataFailures(unittest.IsolatedAsyncioTestCase):
+    class FailingClient:
+        async def get(self, *_args, **_kwargs):
+            raise RuntimeError("funding metadata timeout")
+
+    async def test_binance_interval_refresh_does_not_keep_an_old_interval_map(self):
+        from collectors.binance import BinanceCollector
+
+        collector = BinanceCollector(Settings().binance)
+        collector._client = self.FailingClient()
+        collector._interval_map = {"BTCUSDT": 8}
+
+        with self.assertRaises(RuntimeError):
+            await collector._refresh_intervals()
+
+    async def test_aster_interval_refresh_does_not_keep_an_old_interval_map(self):
+        from collectors.aster import AsterCollector
+
+        collector = AsterCollector(Settings().aster)
+        collector._client = self.FailingClient()
+        collector._interval_map = {"BTCUSDT": 8}
+
+        with self.assertRaises(RuntimeError):
+            await collector._refresh_intervals()
+
+
+class TestCliMarketTimestamps(unittest.IsolatedAsyncioTestCase):
+    class FakeCollector:
+        def __init__(self, exchange: str, price: float):
+            self.exchange = exchange
+            self.price = price
+
+        async def fetch_markets(self, _symbols):
+            return {
+                "BTCUSDT": MarketDatum(
+                    symbol="BTCUSDT",
+                    price=self.price,
+                    funding_rate=0.0,
+                    volume_24h=1_000_000,
+                    exchange=self.exchange,
+                    best_bid=self.price - 0.1,
+                    best_ask=self.price,
+                )
+            }
+
+    async def test_run_cycle_stamps_markets_before_analysis(self):
+        import monitor
+
+        captured = {}
+
+        def assert_fresh_timestamps(_symbols, exchanges_data, _cfg):
+            captured["timestamps"] = [
+                market.timestamp
+                for markets in exchanges_data.values()
+                for market in markets.values()
+            ]
+            return [], {}, {}
+
+        cfg = SimpleNamespace(tracked_symbols=["BTCUSDT"])
+        collectors = {
+            "binance": self.FakeCollector("binance", 100.0),
+            "aster": self.FakeCollector("aster", 101.0),
+        }
+        with patch("monitor.update_pre_settlement_rates"), patch(
+            "monitor.analyse_markets", side_effect=assert_fresh_timestamps
+        ):
+            await monitor.run_cycle(cfg, collectors, MagicMock())
+
+        self.assertTrue(all(timestamp is not None for timestamp in captured["timestamps"]))
+
+
+class TestDashboardSnapshotFreshness(unittest.TestCase):
+    def test_stale_exchange_is_hidden_from_dashboard_response(self):
+        from market_state import dashboard_snapshot
+
+        source = {
+            "markets": {
+                "BTCUSDT": {
+                    "binance": {"price": 100.0},
+                    "aster": {"price": 101.0},
+                }
+            },
+            "opportunities": [
+                {
+                    "symbol": "BTCUSDT",
+                    "details": {
+                        "buy_exchange": "binance",
+                        "sell_exchange": "aster",
+                    },
+                }
+            ],
+            "reasons": {},
+            "symbol_max_intervals": {"BTCUSDT": 8},
+            "last_update": "2026-07-28 00:00:00",
+            "data_version": 1,
+            "exchange_status": {
+                "binance": {"state": "fresh", "last_success_at": 1_000.0},
+                "aster": {"state": "fresh", "last_success_at": 1_080.0},
+            },
+        }
+
+        snapshot = dashboard_snapshot(source, market_stale_seconds=30, now=1_100.0)
+
+        self.assertEqual(snapshot["exchange_status"]["binance"]["state"], "stale")
+        self.assertIsNone(snapshot["markets"]["BTCUSDT"]["binance"])
+        self.assertEqual(snapshot["opportunities"], [])
+
+    def test_zero_stale_threshold_keeps_fresh_snapshot_available(self):
+        from market_state import dashboard_snapshot
+
+        source = {
+            "markets": {"BTCUSDT": {"binance": {"price": 100.0}}},
+            "opportunities": [],
+            "exchange_status": {
+                "binance": {"state": "fresh", "last_success_at": 1_000.0},
+            },
+        }
+
+        snapshot = dashboard_snapshot(source, market_stale_seconds=0, now=1_100.0)
+
+        self.assertEqual(snapshot["exchange_status"]["binance"]["state"], "fresh")
+
+
+class TestNotificationDepthFilter(unittest.IsolatedAsyncioTestCase):
+    async def test_notifier_sends_only_depth_supported_routes(self):
+        from notifier import WeChatNotifier
+
+        settings = SimpleNamespace(
+            wechat_webhook="https://example.com/webhook",
+            notify_minute_offset=0,
+            notification_exchanges=[],
+            cooldown_seconds=0,
+        )
+        unsupported = ArbitrageOpportunity(
+            symbol="UNSUPPORTEDUSDT",
+            direction="lighter_long_hyperliquid_short",
+            entry_exchange="lighter",
+            exit_exchange="hyperliquid",
+            gross_spread_bps=200.0,
+            net_spread_bps=150.0,
+            funding_diff=0.01,
+            recommendation="WATCH",
+            details={
+                "buy_exchange": "lighter",
+                "sell_exchange": "hyperliquid",
+            },
+        )
+        supported = ArbitrageOpportunity(
+            symbol="SUPPORTEDUSDT",
+            direction="binance_long_aster_short",
+            entry_exchange="binance",
+            exit_exchange="aster",
+            gross_spread_bps=200.0,
+            net_spread_bps=150.0,
+            funding_diff=0.01,
+            recommendation="WATCH",
+            details={
+                "buy_exchange": "binance",
+                "sell_exchange": "aster",
+                "entry_check_supported": True,
+            },
+        )
+
+        with (
+            patch.object(WeChatNotifier, "_load_state", return_value={}),
+            patch.object(WeChatNotifier, "_save_state"),
+            patch.object(WeChatNotifier, "_post", new_callable=AsyncMock, return_value=True) as post,
+        ):
+            notifier = WeChatNotifier(settings)
+            await notifier.send([unsupported, supported])
+
+        post.assert_awaited_once()
+        content = post.await_args.args[1]
+        self.assertIn("SUPPORTEDUSDT", content)
+        self.assertNotIn("UNSUPPORTEDUSDT", content)
+
+    async def test_failed_delivery_does_not_start_cooldown(self):
+        from notifier import WeChatNotifier
+
+        settings = SimpleNamespace(
+            wechat_webhook="https://example.com/webhook",
+            notify_minute_offset=0,
+            notification_exchanges=[],
+            cooldown_seconds=1800,
+        )
+        opportunity = ArbitrageOpportunity(
+            symbol="SUPPORTEDUSDT",
+            direction="binance_long_aster_short",
+            entry_exchange="binance",
+            exit_exchange="aster",
+            gross_spread_bps=200.0,
+            net_spread_bps=150.0,
+            funding_diff=0.01,
+            recommendation="WATCH",
+            details={
+                "buy_exchange": "binance",
+                "sell_exchange": "aster",
+                "entry_check_supported": True,
+            },
+        )
+
+        with (
+            patch.object(WeChatNotifier, "_load_state", return_value={}),
+            patch.object(WeChatNotifier, "_save_state") as save_state,
+            patch.object(WeChatNotifier, "_post", new_callable=AsyncMock, side_effect=[False, True]) as post,
+        ):
+            notifier = WeChatNotifier(settings)
+            await notifier.send([opportunity])
+            await notifier.send([opportunity])
+
+        self.assertEqual(post.await_count, 2)
+        self.assertEqual(save_state.call_count, 1)
+
+
+class TestEntryCheckRouteCapability(unittest.TestCase):
+    class DepthCollector:
+        async def fetch_order_book(self, _symbol, _limit):
+            return {"bids": [], "asks": []}
+
+    def test_route_requires_depth_on_both_legs(self):
+        from api import entry_check_supported
+
+        collectors = {
+            "binance": self.DepthCollector(),
+            "aster": self.DepthCollector(),
+            "lighter": object(),
+        }
+
+        self.assertTrue(entry_check_supported("binance", "aster", collectors))
+        self.assertFalse(entry_check_supported("binance", "lighter", collectors))
+
+    def test_analysis_routes_are_annotated_before_notification(self):
+        import entry_check
+
+        opportunities = [
+            ArbitrageOpportunity(
+                symbol="SUPPORTEDUSDT",
+                direction="binance_long_aster_short",
+                entry_exchange="binance",
+                exit_exchange="aster",
+                gross_spread_bps=100.0,
+                net_spread_bps=80.0,
+                funding_diff=0.01,
+                recommendation="WATCH",
+                details={"buy_exchange": "binance", "sell_exchange": "aster"},
+            ),
+            ArbitrageOpportunity(
+                symbol="UNSUPPORTEDUSDT",
+                direction="binance_long_lighter_short",
+                entry_exchange="binance",
+                exit_exchange="lighter",
+                gross_spread_bps=100.0,
+                net_spread_bps=80.0,
+                funding_diff=0.01,
+                recommendation="WATCH",
+                details={"buy_exchange": "binance", "sell_exchange": "lighter"},
+            ),
+        ]
+        collectors = {
+            "binance": self.DepthCollector(),
+            "aster": self.DepthCollector(),
+            "lighter": object(),
+        }
+
+        entry_check.annotate_entry_check_support(opportunities, collectors)
+
+        self.assertTrue(opportunities[0].details["entry_check_supported"])
+        self.assertFalse(opportunities[1].details["entry_check_supported"])
+
+
+class TestGrvtCollectorFailures(unittest.IsolatedAsyncioTestCase):
+    class FailingSession:
+        async def post(self, *_args, **_kwargs):
+            raise RuntimeError("GRVT instruments unavailable")
+
+    async def test_instrument_fetch_error_reaches_api_health_tracking(self):
+        from collectors.grvt import GrvtCollector
+
+        collector = GrvtCollector(Settings().grvt)
+        collector._session = self.FailingSession()
+
+        with self.assertRaisesRegex(RuntimeError, "GRVT instruments unavailable"):
+            await collector.fetch_markets([])
 
 
 if __name__ == '__main__':

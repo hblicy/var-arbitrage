@@ -7,6 +7,7 @@ import asyncio
 import logging
 from contextlib import suppress
 import sys
+import time
 
 from dotenv import load_dotenv
 
@@ -18,7 +19,9 @@ from collectors.lighter import LighterCollector
 from collectors.hyperliquid import HyperliquidCollector
 from collectors.backpack import BackpackCollector
 from config import Settings, settings
+from entry_check import annotate_entry_check_support
 from notifier import WeChatNotifier
+from market_state import stamp_market_timestamps
 from position_tracker import accumulate_funding, update_pre_settlement_rates
 
 if sys.platform == "win32":
@@ -71,6 +74,7 @@ async def run_cycle(
         symbols_to_analyze = symbols
 
     opportunities, _, _ = analyse_markets(symbols_to_analyze, exchanges_data, cfg)
+    annotate_entry_check_support(opportunities, collectors)
     if opportunities:
         logger.info("发现 %d 个套利机会", len(opportunities))
         for opp in opportunities:
@@ -116,7 +120,9 @@ async def funding_settlement_loop(
 
 async def _safe_fetch(collector, symbols, label: str):
     try:
-        return await collector.fetch_markets(symbols)
+        data = await collector.fetch_markets(symbols)
+        stamp_market_timestamps(data, time.time())
+        return data
     except Exception as exc:
         logger.exception("获取 %s 行情失败: %s", label, exc)
         return {}

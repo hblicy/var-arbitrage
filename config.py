@@ -100,6 +100,8 @@ class ExchangeSettings:
     enabled: bool = True
     # 最小 24h 交易额过滤（单位 USD）
     min_volume_usd: Optional[float] = None
+    # 资金费周期元数据的最短刷新间隔（秒）
+    metadata_refresh_seconds: int = _env_int("FUNDING_METADATA_REFRESH_SECONDS", 60)
 
 
 @dataclass
@@ -153,7 +155,9 @@ class ScheduleSettings:
     """任务调度相关配置。"""
 
     # 监控轮询间隔（秒）
-    interval_seconds: int = _env_int("ARBITRAGE_SCAN_INTERVAL", 180)
+    interval_seconds: int = _env_int("ARBITRAGE_SCAN_INTERVAL", 10)
+    # 单所行情成功采集后的最大可用时长；超过后不得参与机会计算
+    market_stale_seconds: int = _env_int("MARKET_STALE_SECONDS", 30)
 
 
 @dataclass
@@ -175,6 +179,17 @@ class NotificationSettings:
 
 
 @dataclass
+class EntryCheckSettings:
+    """Manual entry verification limits. This monitor never submits orders."""
+
+    notional_usd: float = _env_float("ENTRY_CHECK_NOTIONAL_USD", 1_000.0)
+    safety_buffer_bps: float = _env_float("ENTRY_CHECK_SAFETY_BUFFER_BPS", 20.0)
+    max_quote_age_ms: int = _env_int("ENTRY_CHECK_MAX_QUOTE_AGE_MS", 2_000)
+    max_leg_skew_ms: int = _env_int("ENTRY_CHECK_MAX_LEG_SKEW_MS", 1_000)
+    book_depth_limit: int = _env_int("ENTRY_CHECK_BOOK_DEPTH_LIMIT", 100)
+
+
+@dataclass
 class Settings:
     """全局配置入口，供其它模块引用。"""
 
@@ -190,6 +205,7 @@ class Settings:
     thresholds: ThresholdSettings = field(default_factory=ThresholdSettings)
     fees: FeeSettings = field(default_factory=FeeSettings)
     notifications: NotificationSettings = field(default_factory=NotificationSettings)
+    entry_check: EntryCheckSettings = field(default_factory=EntryCheckSettings)
     nado: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
         name="Nado",
         base_url=os.getenv("NADO_BASE_URL", "https://archive.test.nado.xyz"),

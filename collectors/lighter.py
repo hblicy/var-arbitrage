@@ -57,7 +57,7 @@ class LighterCollector(MarketCollector):
             
         return f"{clean_sym.upper()}USDT"
 
-    @with_retry(max_retries=3, backoff_base=2, default_return={})
+    @with_retry(max_retries=3, backoff_base=2)
     async def fetch_markets(self, symbols: Iterable[str]) -> Dict[str, MarketDatum]:
         """Fetch market data from Lighter."""
         target_symbols = list(symbols)
