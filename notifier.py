@@ -14,6 +14,12 @@ from models import ArbitrageOpportunity
 logger = logging.getLogger(__name__)
 
 
+def _is_binance_variational_route(opportunity: ArbitrageOpportunity) -> bool:
+    buy_exchange = str(opportunity.details.get("buy_exchange", "")).lower()
+    sell_exchange = str(opportunity.details.get("sell_exchange", "")).lower()
+    return {buy_exchange, sell_exchange} == {"binance", "variational"}
+
+
 class WeChatNotifier:
     def __init__(self, settings: NotificationSettings) -> None:
         self.settings = settings
@@ -82,9 +88,10 @@ class WeChatNotifier:
         items = [
             opp for opp in opportunities
             if opp.details.get("entry_check_supported") is True
+            or _is_binance_variational_route(opp)
         ]
         if not items:
-            logger.debug("Skip arbitrage alert because no route supports two-sided depth checks.")
+            logger.info("Skip arbitrage alert because no route supports depth checks or Binance-Variational manual review.")
             return
 
         whitelist = self.settings.notification_exchanges
@@ -249,10 +256,7 @@ def _format_exit_alerts(signals: List[Dict]) -> str:
 
 def _format_text(items: Iterable[ArbitrageOpportunity]) -> str:
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    lines = [
-        f"🔎 套利观察信号 [{current_time_str}]",
-        "以下不是开仓指令；请先在面板完成 1000 USDT/腿的实时深度复核。",
-    ]
+    lines = [f"💰 套利提醒 [{current_time_str}]"]
 
     for opp in items:
         details = opp.details
@@ -311,7 +315,7 @@ def _format_text(items: Iterable[ArbitrageOpportunity]) -> str:
                 f"资金费优势：{_format_signed_percent(funding_hourly_bps / 100)}/h | "
                 f"{_format_signed_percent(funding_daily_bps / 100)}/day\n"
                 f"覆盖时间：{cover_text}\n"
-                f"24h假设收敛估算：{_format_signed_percent(projected_24h_bps / 100)}（价差+资金费，非已实现收益）\n"
+                f"24h估算：{_format_signed_percent(projected_24h_bps / 100)}（价差+资金费）\n"
                 f"资金费时差：{interval_display}"
                 f"{hl_note}"
                 f"{limit_note}"

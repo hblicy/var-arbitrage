@@ -721,9 +721,9 @@ class TestAnalyzerExecutableSpread(unittest.TestCase):
 
         self.assertIn("资金费覆盖价差", content)
         self.assertIn("覆盖时间：约 11.4 小时", content)
-        self.assertIn("24h假设收敛估算：+24.7178%", content)
+        self.assertIn("24h估算：+24.7178%", content)
 
-    def test_notification_requires_manual_depth_recheck(self):
+    def test_notification_uses_legacy_alert_copy(self):
         opp = ArbitrageOpportunity(
             symbol="BTCUSDT",
             direction="binance_long_aster_short",
@@ -742,8 +742,9 @@ class TestAnalyzerExecutableSpread(unittest.TestCase):
 
         content = _format_text([opp])
 
-        self.assertIn("不是开仓指令", content)
-        self.assertIn("1000 USDT/腿", content)
+        self.assertTrue(content.startswith("💰 套利提醒"))
+        self.assertNotIn("不是开仓指令", content)
+        self.assertNotIn("1000 USDT/腿", content)
 
 
 class TestMarketFreshness(unittest.TestCase):
@@ -1106,6 +1107,42 @@ class TestDashboardSnapshotFreshness(unittest.TestCase):
 
 
 class TestNotificationDepthFilter(unittest.IsolatedAsyncioTestCase):
+    async def test_notifier_sends_binance_variational_without_depth_check(self):
+        from notifier import WeChatNotifier
+
+        settings = SimpleNamespace(
+            wechat_webhook="https://example.com/webhook",
+            notify_minute_offset=0,
+            notification_exchanges=[],
+            cooldown_seconds=0,
+        )
+        opportunity = ArbitrageOpportunity(
+            symbol="MANUALUSDT",
+            direction="binance_long_variational_short",
+            entry_exchange="binance",
+            exit_exchange="variational",
+            gross_spread_bps=200.0,
+            net_spread_bps=150.0,
+            funding_diff=0.01,
+            recommendation="WATCH",
+            details={
+                "buy_exchange": "binance",
+                "sell_exchange": "variational",
+                "entry_check_supported": False,
+            },
+        )
+
+        with (
+            patch.object(WeChatNotifier, "_load_state", return_value={}),
+            patch.object(WeChatNotifier, "_save_state"),
+            patch.object(WeChatNotifier, "_post", new_callable=AsyncMock, return_value=True) as post,
+        ):
+            notifier = WeChatNotifier(settings)
+            await notifier.send([opportunity])
+
+        post.assert_awaited_once()
+        self.assertIn("MANUALUSDT", post.await_args.args[1])
+
     async def test_notifier_sends_only_depth_supported_routes(self):
         from notifier import WeChatNotifier
 
