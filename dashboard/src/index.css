@@ -1445,10 +1445,6 @@ tbody tr:hover {
   color: #fbbf24;
 }
 
-.entry-check-result.manual {
-  color: #fbbf24;
-}
-
 .execution-state {
   display: inline-flex;
   align-items: center;
@@ -1476,14 +1472,6 @@ tbody tr:hover {
 
 .execution-state.actionable .execution-state-dot {
   background: #22c55e;
-}
-
-.execution-state.manual {
-  color: #fbbf24;
-}
-
-.execution-state.manual .execution-state-dot {
-  background: #f59e0b;
 }
 
 .execution-state.unavailable,

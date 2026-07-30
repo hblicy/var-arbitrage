@@ -123,8 +123,7 @@ const entryCheckMessage = (entryCheck) => {
   return `不可开：${reason}`;
 };
 
-const entryCheckStatusLabel = (entryCheck, manualReview) => {
-  if (manualReview) return '需人工复核 Variational';
+const entryCheckStatusLabel = (entryCheck) => {
   if (!entryCheck) return '待实时复核';
   if (entryCheck.status === 'checking') return '正在复核';
   if (entryCheck.status === 'actionable') return '实时可开（2 秒）';
@@ -189,27 +188,25 @@ const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity, entryChec
           <span>{formatSignedBps(fundingHourlyBps)} bps/h</span>
           <span>量 {formatVolume(buyVolume)} | {formatVolume(sellVolume)}</span>
         </div>
-        <div className={`execution-state ${manualReview ? 'manual' : entryCheck?.status || 'pending'}`}>
-          <span className="execution-state-dot"></span>
-          {entryCheckStatusLabel(entryCheck, manualReview)}
-        </div>
-        {manualReview ? (
-          <div className="entry-check-result manual">
-            请在 Variational 手工确认 1000 USDT 的实际可成交价后，再决定是否开仓。
-          </div>
-        ) : (
-          <button
-            className="entry-check-btn"
-            onClick={() => onVerifyEntry(opportunity)}
-            disabled={entryCheck?.status === 'checking'}
-          >
-            {entryCheck?.status === 'checking' ? '复核中…' : '复核 1000 USDT/腿'}
-          </button>
-        )}
-        {!manualReview && entryCheck && (
-          <div className={`entry-check-result ${entryCheck.status === 'actionable' ? 'pass' : 'fail'}`}>
-            {entryCheckMessage(entryCheck)}
-          </div>
+        {!manualReview && (
+          <>
+            <div className={`execution-state ${entryCheck?.status || 'pending'}`}>
+              <span className="execution-state-dot"></span>
+              {entryCheckStatusLabel(entryCheck)}
+            </div>
+            <button
+              className="entry-check-btn"
+              onClick={() => onVerifyEntry(opportunity)}
+              disabled={entryCheck?.status === 'checking'}
+            >
+              {entryCheck?.status === 'checking' ? '复核中…' : '复核 1000 USDT/腿'}
+            </button>
+            {entryCheck && (
+              <div className={`entry-check-result ${entryCheck.status === 'actionable' ? 'pass' : 'fail'}`}>
+                {entryCheckMessage(entryCheck)}
+              </div>
+            )}
+          </>
         )}
         {(hasMismatch || opportunity.details.suggest_limit_order) && (
           <div className="arb-badges">
@@ -308,7 +305,7 @@ const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, sym
           {bestSymbolOpp ? (
             <>
               <span className="apr-yield">理论 {formatSignedPercent(calcProjected24hPercent(bestSymbolOpp))} <small>/24h</small></span>
-              <span className="bps-value">{manualReview ? '需手工确认 Variational 盘口' : '实时盘口复核前'}</span>
+              {!manualReview && <span className="bps-value">实时盘口复核前</span>}
             </>
           ) : (
             <>
