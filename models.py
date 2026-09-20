@@ -17,6 +17,7 @@ class MarketDatum:
     best_bid: Optional[float] = None  # Best bid price for slippage calculation
     best_ask: Optional[float] = None  # Best ask price for slippage calculation
     next_funding_time: Optional[float] = None  # Next settlement timestamp (UTC ms)
+    next_funding_time_source: str = "exchange"
 
 
 @dataclass

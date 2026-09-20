@@ -188,6 +188,22 @@ class EntryCheckSettings:
 
 
 @dataclass
+class FundingStrategySettings:
+    holding_hours: int = _env_int("FUNDING_HOLDING_HOURS", 8)
+    history_hours: int = _env_int("FUNDING_HISTORY_HOURS", 4)
+    min_coverage: float = _env_float("FUNDING_MIN_COVERAGE", 0.8)
+    sustain_seconds: int = _env_int("FUNDING_SUSTAIN_SECONDS", 120)
+    min_net_bps: float = _env_float("FUNDING_MIN_NET_BPS", 20.0)
+    history_path: str = os.getenv("FUNDING_HISTORY_PATH", "data/strategy.db")
+
+    def __post_init__(self):
+        if self.holding_hours not in (1, 4, 8, 24) or self.history_hours not in (1, 4, 8, 24):
+            raise ValueError("Funding horizons must be 1, 4, 8 or 24 hours")
+        if not 0 < self.min_coverage <= 1 or self.sustain_seconds < 0 or not 0 <= self.min_net_bps < 10000:
+            raise ValueError("Invalid funding signal thresholds")
+
+
+@dataclass
 class Settings:
     """全局配置入口，供其它模块引用。"""
 
@@ -204,6 +220,7 @@ class Settings:
     fees: FeeSettings = field(default_factory=FeeSettings)
     notifications: NotificationSettings = field(default_factory=NotificationSettings)
     entry_check: EntryCheckSettings = field(default_factory=EntryCheckSettings)
+    strategy: FundingStrategySettings = field(default_factory=FundingStrategySettings)
     variational: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
         name="Variational",
         base_url=os.getenv("VARIATIONAL_BASE_URL", "https://omni.variational.io"),

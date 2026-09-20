@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Literal
 from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -22,6 +22,7 @@ from analyzer import analyse_markets
 from notifier import WeChatNotifier
 from entry_check import annotate_entry_check_support, entry_check_supported as has_entry_check_support, evaluate_entry_quote
 from market_state import dashboard_snapshot, replace_exchange_snapshot
+from funding_monitor import FundingMonitor, route_key
 from position_tracker import (
     add_position, remove_position,
     check_exit_signals, estimate_position_pnl, init_tracker,
@@ -136,7 +137,7 @@ def require_admin(current_user: Dict[str, Any] = Depends(get_current_user)) -> D
 
 async def startup_event():
     logger.info("Application Startup. Initializing collectors...")
-    global collectors_hub, notifier, update_task
+    global collectors_hub, notifier, update_task, funding_monitor
     try:
         from db import create_user, get_all_users, init_db
         init_db()
@@ -172,6 +173,7 @@ async def startup_event():
     
     # Initialize global notifier singleton
     notifier = WeChatNotifier(settings.notifications)
+    funding_monitor = FundingMonitor(settings)
     logger.info(f"Notifier initialized (Cooldown: {settings.notifications.cooldown_seconds}s)")
     
     logger.info("Starting background task...")
@@ -312,6 +314,7 @@ collectors_hub: Dict[str, Any] = {}
 # Global notifier (singleton to persist _last_sent state)
 notifier: WeChatNotifier = None
 update_task: asyncio.Task | None = None
+funding_monitor: FundingMonitor | None = None
 
 async def perform_analysis():
     """Analyze current raw data from ALL exchanges (multi-user: frontend filters locally)."""
@@ -460,61 +463,9 @@ async def update_data_loop():
             # Trigger analysis and update state (analyze ALL data)
             opportunities = await perform_analysis()
             
-            # Filter opportunities for WeChat notifications
-            strict_opps = []
-            min_spread = settings.thresholds.notify_min_spread_bps
-            min_funding = settings.thresholds.notify_min_funding_bps
-            min_total = settings.thresholds.notify_min_total_bps
-            max_cover_hours = settings.thresholds.notify_max_cover_hours
-            
-            for opp in opportunities:
-                spread_val = opp.net_spread_bps
-                funding_val = opp.details.get("funding_diff_scaled_bps", 0)
-                base_interval = opp.details.get("base_interval", 8)
-                funding_daily_val = opp.details.get(
-                    "funding_daily_bps",
-                    funding_val * (24 / base_interval) if base_interval > 0 else 0,
-                )
-                projected_24h_val = opp.details.get(
-                    "projected_24h_bps",
-                    spread_val + funding_daily_val,
-                )
-                cover_hours = opp.details.get("cover_hours")
-                
-                # Settlement direction filter:
-                # Block unfavorable direction where long side settles LESS frequently
-                # than short side (e.g. 4h long : 1h short), because when funding
-                # turns negative, the short side charges you every hour and you have
-                # very little time to exit.
-                # Only allow:
-                #   1. Same interval (e.g. 8h:8h, 1h:1h)
-                #   2. Favorable: long on short-interval, short on long-interval
-                native_intervals = opp.details.get("native_intervals", {})
-                buy_interval = native_intervals.get("buy", 8)
-                sell_interval = native_intervals.get("sell", 8)
-                # buy = long side, sell = short side
-                if buy_interval > sell_interval:
-                    # Unfavorable: long side settles less frequently than short side
-                    continue
-                
-                aligned_opportunity = (
-                    spread_val >= min_spread
-                    and funding_daily_val >= min_funding
-                    and projected_24h_val >= min_total
-                )
-                funding_cover_opportunity = (
-                    spread_val < 0
-                    and cover_hours is not None
-                    and cover_hours <= max_cover_hours
-                    and funding_daily_val >= min_funding
-                    and projected_24h_val >= min_total
-                )
-
-                if aligned_opportunity or funding_cover_opportunity:
-                    strict_opps.append(opp)
-            
-            if strict_opps:
-                await notifier.send(strict_opps)
+            if funding_monitor is not None:
+                await funding_monitor.process(opportunities, latest_data["raw_exchanges_data"], collectors_hub,
+                                              on_triggered=notifier.send)
             
             # Check for position exit signals
             try:
@@ -551,6 +502,51 @@ class EntryCheckRequest(BaseModel):
     symbol: str = Field(..., min_length=1, max_length=32)
     long_exchange: str = Field(..., min_length=1, max_length=32)
     short_exchange: str = Field(..., min_length=1, max_length=32)
+
+
+class FundingCheckRequest(EntryCheckRequest):
+    hours: Optional[Literal[1, 4, 8, 24]] = None
+
+
+def _funding_service() -> FundingMonitor:
+    if funding_monitor is None:
+        raise HTTPException(status_code=503, detail="Funding monitor is not initialized")
+    return funding_monitor
+
+
+@app.get("/api/funding")
+async def get_funding_signals():
+    return _funding_service().snapshot(time.time())
+
+
+@app.get("/api/funding/history")
+async def get_funding_history(
+    symbol: str = Query(..., min_length=1, max_length=32),
+    long_exchange: str = Query(..., min_length=1, max_length=32),
+    short_exchange: str = Query(..., min_length=1, max_length=32),
+    hours: int = Query(4),
+):
+    if hours not in (1, 4, 8, 24):
+        raise HTTPException(status_code=422, detail="Holding horizon must be 1, 4, 8 or 24 hours")
+    service = _funding_service()
+    buy, sell = long_exchange.lower(), short_exchange.lower()
+    if buy == sell or buy not in service.cfg.exchanges or sell not in service.cfg.exchanges:
+        raise HTTPException(status_code=400, detail="Unknown or identical exchange pair")
+    key = route_key(symbol, buy, sell)
+    now = time.time()
+    return {"series": service.history.series(key, now, hours),
+            "summary": service.history.summaries(now, hours).get(key),
+            "events": service.history.events(key), "window_hours": hours}
+
+
+@app.post("/api/funding/check")
+async def check_funding_entry(request: FundingCheckRequest):
+    service = _funding_service()
+    buy, sell = request.long_exchange.lower(), request.short_exchange.lower()
+    if buy == sell or buy not in service.cfg.exchanges or sell not in service.cfg.exchanges:
+        raise HTTPException(status_code=400, detail="Unknown or identical exchange pair")
+    return await service.check(request.symbol.upper(), buy, sell, request.hours or service.cfg.strategy.holding_hours,
+                               latest_data["raw_exchanges_data"], collectors_hub)
 
 
 @app.post("/api/entry-check")

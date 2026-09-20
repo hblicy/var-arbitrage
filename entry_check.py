@@ -41,7 +41,7 @@ def _levels_vwap(levels: Iterable[Iterable[float]], quantity: float) -> float | 
         filled = min(remaining, size)
         total += filled * price
         remaining -= filled
-        if remaining <= 1e-12:
+        if remaining <= max(1e-12, quantity * 1e-12):
             return total / quantity
     return None
 

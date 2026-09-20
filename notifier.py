@@ -87,8 +87,11 @@ class WeChatNotifier:
 
         items = [
             opp for opp in opportunities
-            if opp.details.get("entry_check_supported") is True
-            or _is_binance_variational_route(opp)
+            if (opp.details.get("entry_check_supported") is True or _is_binance_variational_route(opp))
+            and ("funding_strategy" not in opp.details or (
+                opp.details["funding_strategy"]["status"] == "triggered"
+                and opp.details["funding_strategy"]["depth"].get("expires_at", 0) >= time.time()
+            ))
         ]
         if not items:
             logger.info("Skip arbitrage alert because no route supports depth checks or Binance-Variational manual review.")
@@ -260,6 +263,23 @@ def _format_text(items: Iterable[ArbitrageOpportunity]) -> str:
 
     for opp in items:
         details = opp.details
+        strategy = details.get('funding_strategy')
+        if strategy:
+            hours = strategy['holding_hours']
+            tiers = strategy['depth'].get('tiers', [])
+            forecast = min(tiers, key=lambda item: abs(item['notional_usd']-strategy['notional_usd'])) if tiers else strategy['projections'][str(hours)]
+            capacity = strategy['depth'].get('capacity')
+            lines.append(
+                f"\n{opp.symbol} · 资金费策略\n"
+                f"方向：{strategy['buy_exchange']} 做多 / {strategy['sell_exchange']} 做空\n"
+                f"{hours}h 收益情景：{forecast.get('net_usd', 0):+.2f} USD / {forecast.get('net_bps', 0):+.1f} bps\n"
+                f"资金费 {forecast.get('funding_usd', 0):+.2f} USD；四笔手续费 {forecast.get('fees_usd', 0):.2f} USD\n"
+                f"连续达标 {strategy['qualified_seconds']:.0f}s；历史覆盖率 {strategy['history']['coverage']:.0%}\n"
+                f"可见盘口容量约 {capacity['notional_usd']:.0f} USD/腿\n"
+                if capacity else f"\n{opp.symbol} · 收益情景待盘口复核\n"
+            )
+            lines.append('假设费率保持不变、退出盘口不变；非保证收益，开仓前须重新复核。')
+            continue
         intervals = details.get("native_intervals", {})
         buy_interval = intervals.get("buy", "?")
         sell_interval = intervals.get("sell", "?")
