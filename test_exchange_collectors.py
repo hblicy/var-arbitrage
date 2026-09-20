@@ -207,6 +207,44 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
         stamp_market_timestamps(markets, NOW + 2)
         self.assertEqual(markets["SOLUSDT"].timestamp, NOW - 29)
 
+    async def test_bulk_stale_symbol_does_not_discard_healthy_markets(self):
+        for stale_field in ("ticker", "book"):
+            with self.subTest(stale_field=stale_field):
+                collector = self.collector("bulk")
+                original_get = collector._client.get
+                stale = True
+
+                async def get(path, params=None):
+                    if path == "/api/v1/exchangeInfo":
+                        return Response([BULK_MARKET, {**BULK_MARKET, "symbol": "MON-USD", "baseAsset": "MON"}])
+                    if path == "/api/v1/ticker/MON-USD":
+                        return Response({**BULK_TICKER, "symbol": "MON-USD",
+                                         "timestamp": int((NOW - (60 if stale and stale_field == "ticker" else 0)) * 1e9)})
+                    if path == "/api/v1/l2book" and params["coin"] == "MON-USD":
+                        response = await original_get(path, {**params, "coin": "SOL-USD"})
+                        response.payload.update(symbol="MON-USD", timestamp=int(
+                            (NOW - (5.632 if stale and stale_field == "book" else 0)) * 1e9))
+                        return response
+                    return await original_get(path, params)
+
+                with patch.object(collector._client, "get", side_effect=get):
+                    with self.assertLogs("collectors.bulk", level="WARNING") as logs:
+                        markets = await collector.fetch_markets([])
+                    self.assertEqual(set(markets), {"SOLUSDT"})
+                    self.assertEqual(markets["SOLUSDT"].timestamp, NOW)
+                    self.assertIn("MONUSDT", " ".join(logs.output))
+                    stale = False
+                    self.assertEqual(set(await collector.fetch_markets([])), {"SOLUSDT", "MONUSDT"})
+
+    async def test_bulk_all_stale_markets_return_empty_without_reusing_old_data(self):
+        collector = self.collector("bulk")
+        self.assertIn("SOLUSDT", await collector.fetch_markets([]))
+        collector._client.book_time = NOW - 60
+        with self.assertLogs("collectors.bulk", level="WARNING"):
+            self.assertEqual(await collector.fetch_markets([]), {})
+        with self.assertRaisesRegex(ValueError, "stale order book"):
+            await collector.fetch_order_book("SOLUSDT", 1)
+
     async def test_zero_and_missing_funding_are_distinct(self):
         for key, symbol, field in [("arcus", "BTCUSDT", "nextFundingRate"), ("bulk", "SOLUSDT", "fundingRate"),
                                    ("risex", "HYPEUSDT", "current_funding_rate")]:
@@ -365,8 +403,9 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
     async def test_stale_bulk_ticker_is_rejected(self):
         collector = self.collector("bulk")
         collector._client.ticker["timestamp"] = int((NOW - 300) * 1e9)
+        self.assertEqual(await collector.fetch_markets([]), {})
         with self.assertRaisesRegex(ValueError, "[Ss]tale"):
-            await collector.fetch_markets([])
+            await collector._market("SOLUSDT", "SOL-USD")
 
     async def test_risex_interval_comes_from_nanoseconds(self):
         collector = self.collector("risex")

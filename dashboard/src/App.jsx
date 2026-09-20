@@ -343,10 +343,13 @@ function App() {
   const abortControllerRef = useRef(null);
 
   const fetchData = useCallback(async ({ force = false } = {}) => {
+    if (abortControllerRef.current && !abortControllerRef.current.signal.aborted && !force) return;
     abortControllerRef.current?.abort();
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 30000);
     try {
       const response = await fetch('/api/data', { cache: 'no-store', signal: controller.signal });
       if (!response.ok) throw new Error('Network response was not ok');
@@ -362,10 +365,11 @@ function App() {
       });
       setError(null);
     } catch (err) {
-      if (err.name === 'AbortError') return;
-      setError('连接后端失败，请确认 api.py 正在运行。');
+      if (abortControllerRef.current !== controller || (err.name === 'AbortError' && !timedOut)) return;
+      setError(timedOut ? '行情数据加载超时，将自动重试。' : '连接后端失败，请确认 api.py 正在运行。');
       console.error('Fetch error:', err);
     } finally {
+      clearTimeout(timeout);
       if (abortControllerRef.current === controller) {
         abortControllerRef.current = null;
       }

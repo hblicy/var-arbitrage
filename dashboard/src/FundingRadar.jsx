@@ -66,17 +66,28 @@ export default function FundingRadar({ enabledExchanges }) {
   const checkAbort = useRef(null);
   const requestSequence = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async ({ force = false } = {}) => {
+    if (scanAbort.current && !scanAbort.current.signal.aborted && !force) return;
     scanAbort.current?.abort();
     const controller = new AbortController();
     scanAbort.current = controller;
     const started = performance.now();
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 30000);
     try {
       const response = await fetch('/api/funding', { signal: controller.signal, cache: 'no-store' });
       if (!response.ok) throw new Error('资金费策略服务暂不可用');
       const data = await response.json();
       if (!controller.signal.aborted) { setPacket({ data, received: started }); setError(''); }
-    } catch (err) { if (err.name !== 'AbortError') setError(err.message); }
+    } catch (err) {
+      if (scanAbort.current === controller) {
+        if (timedOut) setError('资金费数据加载超时，将自动重试');
+        else if (err.name !== 'AbortError') setError(err.message);
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (scanAbort.current === controller) scanAbort.current = null;
+    }
   }, []);
 
   useEffect(() => {
@@ -138,8 +149,9 @@ export default function FundingRadar({ enabledExchanges }) {
 
   const currentHistory = history?.key === selectedKey && history.hours === historyHours ? history : null;
   const currentCheck = check?.key === selectedKey && check.hours === hours ? check : null;
-  const projection = selected?.projections[String(hours)];
-  const selectedDepth = selectFundingDepth(currentCheck?.result,
+  const selectedPaused = selected && signalState(selected, now, data?.market_stale_seconds) === 'paused';
+  const projection = selectedPaused ? null : selected?.projections[String(hours)];
+  const selectedDepth = selectedPaused ? null : selectFundingDepth(currentCheck?.result,
     hours === selected?.holding_hours ? selected?.depth : null, now);
 
   return <section className="fund-radar" aria-label="资金费策略监控">
@@ -149,7 +161,7 @@ export default function FundingRadar({ enabledExchanges }) {
         {[1, 4, 8, 24].map(value => <option key={value} value={value}>{value} 小时</option>)}
       </select></label>
       <input aria-label="搜索资金费标的" placeholder="搜索币种" value={search} onChange={event => setSearch(event.target.value)} />
-      <button type="button" onClick={refresh}>刷新</button>
+      <button type="button" onClick={() => refresh({ force: true })}>刷新</button>
     </div>
     <p className="fund-assumptions">单腿名义金额 {format(data?.notional_usd || 1000, 0)} USD；假设资金费率与退出盘口保持当前值。已计四笔手续费，不以保证金为收益分母，不代表保证收益。</p>
     <p className="fund-muted">通知使用 {data?.default_hours || 8}h 情景、净收益 ≥ {data?.min_net_bps ?? 20} bps、历史覆盖 ≥ {format((data?.min_coverage ?? 0.8)*100, 0)}%、连续 {data?.sustain_seconds ?? 120}s。切换评估时长仅影响本页排序与复核。</p>
@@ -164,11 +176,11 @@ export default function FundingRadar({ enabledExchanges }) {
         const depth = hours === row.holding_hours ? liveDepth(row.depth, now) : null;
         return <tr key={row.key} className={selectedKey === row.key ? 'fund-selected' : ''}>
           <td><button className="fund-route" onClick={() => setSelectedKey(row.key)}>{row.symbol.replace('USDT', '')}<small>{row.buy_exchange} 多 / {row.sell_exchange} 空</small></button></td>
-          <td className={state !== 'paused' && forecast?.net_usd > 0 ? 'fund-positive' : ''}>{state === 'paused' ? '—' : `${signed(forecast?.net_usd)} USD`}<small>{signed(forecast?.net_bps)} bps · 顶层盘口估算</small></td>
-          <td>{signed(row.funding_hourly_bps)} bps</td><td>{signed(row.spread_deviation_bps)} bps</td>
+          <td className={state !== 'paused' && forecast?.net_usd > 0 ? 'fund-positive' : ''}>{state === 'paused' ? '—' : `${signed(forecast?.net_usd)} USD`}<small>{state === 'paused' ? '暂停评估，等待有效行情' : `${signed(forecast?.net_bps)} bps · 顶层盘口估算`}</small></td>
+          <td>{state === 'paused' ? '—' : `${signed(row.funding_hourly_bps)} bps`}</td><td>{state === 'paused' ? '—' : `${signed(row.spread_deviation_bps)} bps`}</td>
           <td>{format(row.history.coverage*100, 1)}%<small>{format(row.history.valid_seconds/3600)} / {row.history.window_hours || data?.history_hours}h</small></td>
-          <td><span className={`fund-state ${state}`}>{stateNames[state]}</span><small>{state === 'paused' ? '行情已中断' : `${format(row.qualified_seconds, 0)} / ${row.required_seconds}s · ${reasonText(row.reason)}`}</small></td>
-          <td>{depth?.capacity ? `${format(depth.capacity.notional_usd, 0)} USD` : '待实时复核'}<small>按单腿名义金额</small></td>
+          <td><span className={`fund-state ${state}`}>{stateNames[state]}</span><small>{state === 'paused' ? '行情过期或本轮采集中断' : `${format(row.qualified_seconds, 0)} / ${row.required_seconds}s · ${reasonText(row.reason)}`}</small></td>
+          <td>{state === 'paused' ? '暂无有效行情' : depth?.capacity ? `${format(depth.capacity.notional_usd, 0)} USD` : '待实时复核'}<small>按单腿名义金额</small></td>
         </tr>;
       })}
       {!rows.length && <tr><td colSpan="7" className="fund-empty">暂无可分析路线。等待有效双边行情；历史样本会随采集逐步积累。</td></tr>}
@@ -176,7 +188,7 @@ export default function FundingRadar({ enabledExchanges }) {
     {rows.length > 100 && <p className="fund-muted">显示收益排序前 100 条，可搜索币种或调整交易所筛选。</p>}
     {selected && <section className="fund-detail" aria-label="资金费路线详情">
       <div className="fund-toolbar"><h3>{selected.symbol} · {selected.buy_exchange} 多 / {selected.sell_exchange} 空</h3><button onClick={() => setSelectedKey(null)}>关闭详情</button></div>
-      {projection?.reason ? <p>{reasonText(projection.reason)}</p> : <>
+      {selectedPaused ? <p className="fund-muted">行情已过期或本轮采集中断，收益拆解与盘口容量暂停展示，等待有效行情后重新评估。</p> : projection?.reason ? <p>{reasonText(projection.reason)}</p> : <>
         <div className="fund-breakdown">
           {[['预计资金费', projection?.funding_usd], ['开仓价差收益', projection?.entry_spread_usd], ['平仓价差成本', projection?.exit_spread_cost_usd], ['四笔手续费', projection?.fees_usd], [`${hours}h 净收益`, projection?.net_usd]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{signed(value)} USD</strong></div>)}
         </div>
@@ -185,7 +197,7 @@ export default function FundingRadar({ enabledExchanges }) {
       </>}
       <div className="fund-toolbar"><h3>计划金额与盘口容量</h3><button onClick={verify} disabled={currentCheck?.pending}>{currentCheck?.pending ? '复核中…' : `复核 ${hours}h 分档容量`}</button></div>
       {currentCheck?.error && <p role="alert">{currentCheck.error}</p>}
-      <DepthTable depth={selectedDepth} now={now} />
+      {!selectedPaused && <DepthTable depth={selectedDepth} now={now} />}
       <div className="fund-toolbar"><h3>历史基准</h3><label>回看 <select value={historyHours} onChange={event => setHistoryHours(Number(event.target.value))}>{[1, 4, 8, 24].map(value => <option key={value} value={value}>{value} 小时</option>)}</select></label></div>
       {!currentHistory && <p>正在加载历史…</p>}
       {currentHistory?.error && <p role="alert">{currentHistory.error}</p>}
