@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Nado ↔ Variational arbitrage monitor."""
+"""Cross-exchange arbitrage monitor."""
 from __future__ import annotations
 
 import asyncio
@@ -12,12 +12,10 @@ import time
 from dotenv import load_dotenv
 
 from analyzer import analyse_markets
-from collectors.nado import NadoCollector
 from collectors.variational import VariationalCollector
 from collectors.binance import BinanceCollector
 from collectors.lighter import LighterCollector
 from collectors.hyperliquid import HyperliquidCollector
-from collectors.backpack import BackpackCollector
 from config import Settings, settings
 from entry_check import annotate_entry_check_support
 from notifier import WeChatNotifier
