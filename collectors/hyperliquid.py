@@ -12,12 +12,14 @@ Funding rate is per-hour (1h settlement cycle).
 from __future__ import annotations
 
 import logging
+import math
+import time
 from typing import Dict, Iterable, Optional
 
 from collectors.base import MarketCollector
 from collectors.decorators import with_retry
 from collectors.session_pool import session_pool
-from config import ExchangeSettings
+from config import ExchangeSettings, settings as app_settings
 from models import MarketDatum
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,7 @@ class HyperliquidCollector(MarketCollector):
             base_url=self.settings.base_url,
             timeout=self.settings.timeout,
         )
+        self._symbols: Dict[str, str] = {}
 
     def _normalise_symbol(self, raw_name: str) -> str:
         """Convert Hyperliquid asset name (e.g. BTC) to internal (BTCUSDT).
@@ -64,6 +67,12 @@ class HyperliquidCollector(MarketCollector):
         meta = payload[0]
         ctxs = payload[1]
         universe = meta.get("universe", [])
+        self._symbols = {
+            self._normalise_symbol(asset['name']): asset['name'] for asset in universe
+            if not asset.get('isDelisted')
+            and asset['name'] not in self.settings.excluded_symbols
+            and self._normalise_symbol(asset['name']) not in self.settings.excluded_symbols
+        }
 
         markets: Dict[str, MarketDatum] = {}
 
@@ -73,6 +82,8 @@ class HyperliquidCollector(MarketCollector):
 
             raw_name = asset_info.get("name", "")
             norm_sym = self._normalise_symbol(raw_name)
+            if norm_sym not in self._symbols:
+                continue
 
             # Check blacklist
             if norm_sym in self.settings.excluded_symbols:
@@ -124,6 +135,44 @@ class HyperliquidCollector(MarketCollector):
 
         logger.info("Fetched %d markets from Hyperliquid.", len(markets))
         return markets
+
+    async def fetch_order_book(self, symbol: str, limit: int) -> dict:
+        if limit <= 0:
+            raise ValueError('Hyperliquid book limit must be positive')
+        if symbol not in self._symbols:
+            await self.fetch_markets([symbol])
+        native = self._symbols.get(symbol)
+        if native is None or symbol in self.settings.excluded_symbols or native in self.settings.excluded_symbols:
+            raise ValueError(f'Hyperliquid unsupported market: {symbol}')
+        response = await self._session.post('/info', json={'type': 'l2Book', 'coin': native})
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get('coin') != native:
+            raise ValueError(f'Hyperliquid {symbol}: mismatched book symbol')
+        raw_time = payload.get('time')
+        if not isinstance(raw_time, (int, float)) or not math.isfinite(raw_time):
+            raise ValueError(f'Hyperliquid {symbol}: invalid book timestamp')
+        timestamp = raw_time / 1000
+        age_ms = (time.time() - timestamp) * 1000
+        if age_ms > app_settings.entry_check.max_quote_age_ms or age_ms < -5000:
+            raise ValueError(f'Hyperliquid {symbol}: stale order book ({age_ms:.0f} ms)')
+        levels = payload.get('levels')
+        if not isinstance(levels, list) or len(levels) != 2:
+            raise ValueError(f'Hyperliquid {symbol}: invalid book levels')
+        book = {}
+        for side, rows in zip(('bids', 'asks'), levels):
+            parsed = []
+            for row in rows:
+                price, size = float(row['px']), float(row['sz'])
+                if not math.isfinite(price) or not math.isfinite(size) or price <= 0 or size <= 0:
+                    raise ValueError(f'Hyperliquid {symbol}: invalid book level')
+                parsed.append([price, size])
+            # The public endpoint returns at most 20 levels per side.
+            book[side] = sorted(parsed, key=lambda level: level[0], reverse=side == 'bids')[:limit]
+        if book['bids'] and book['asks'] and book['bids'][0][0] >= book['asks'][0][0]:
+            raise ValueError(f'Hyperliquid {symbol}: crossed order book')
+        book['timestamp'] = timestamp
+        return book
 
     async def aclose(self) -> None:
         # Shared session pool handles closing
