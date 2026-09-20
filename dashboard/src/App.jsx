@@ -240,14 +240,18 @@ const ObservationPool = React.memo(function ObservationPool({ opportunities }) {
   return (
     <details className="observation-pool" open>
       <summary>观察池 · {opportunities.length} 条不可复核路线</summary>
-      <p>这些路线没有双边实时盘口，不能作为开仓候选；仅保留用于跟踪资金费和价差变化。</p>
+      <p>这些路线暂不支持双边实时深度复核，仅用于跟踪资金费和价差。Variational 使用询价机制，公开报价可能缓存 10 分钟，需到交易所确认实际成交报价。</p>
       <div className="observation-list">
         {visible.map((opportunity) => (
           <div className="observation-row" key={`${opportunity.symbol}:${opportunity.direction}`}>
             <span className="observation-symbol">{opportunity.symbol.replace('USDT', '')}</span>
             <span>{formatExchangeName(opportunity.details.buy_exchange)} 多 → {formatExchangeName(opportunity.details.sell_exchange)} 空</span>
             <span className="observation-yield">理论 24h {formatSignedPercent(calcProjected24hPercent(opportunity))}</span>
-            <span className="observation-status">缺少双边盘口</span>
+            <span className="observation-status">
+              {[opportunity.details.buy_exchange, opportunity.details.sell_exchange]
+                .some((exchange) => exchange?.toLowerCase() === 'variational')
+                ? 'Variational 需实时询价' : '暂未接入深度复核'}
+            </span>
           </div>
         ))}
       </div>
