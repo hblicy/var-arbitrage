@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from abc import ABC, abstractmethod
 from typing import Dict, Iterable, List
 
@@ -35,4 +36,17 @@ class MarketCollector(ABC):
             async with semaphore:
                 return await coro
 
-        return await asyncio.gather(*[_run(c) for c in coros])
+        tasks = [asyncio.create_task(_run(coro)) for coro in coros]
+        try:
+            return await asyncio.gather(*tasks)
+        except BaseException:
+            # A retry must not overlap requests left running by the failed batch.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        finally:
+            # Wrappers cancelled while waiting for the semaphore never await these.
+            for coro in coros:
+                if inspect.iscoroutine(coro):
+                    coro.close()

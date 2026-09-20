@@ -1,4 +1,4 @@
-"""Configuration module for the Nado ↔ Variational arbitrage monitor.
+"""Configuration for the cross-exchange arbitrage monitor.
 
 配置说明：
 - 所有参数均可通过环境变量覆盖，便于在测试网 / 主网上切换。
@@ -142,8 +142,6 @@ class ThresholdSettings:
 class FeeSettings:
     """交易成本估算参数。"""
 
-    # Nado 单边吃单手续费（基点）
-    nado_taker_bps: float = _env_float("NADO_TAKER_FEE_BPS", 5.0)
     # Variational 单边吃单手续费（基点）
     variational_taker_bps: float = _env_float("VARIATIONAL_TAKER_FEE_BPS", 5.0)
     # 假设的双边滑点（基点），每条腿各一次
@@ -206,30 +204,6 @@ class Settings:
     fees: FeeSettings = field(default_factory=FeeSettings)
     notifications: NotificationSettings = field(default_factory=NotificationSettings)
     entry_check: EntryCheckSettings = field(default_factory=EntryCheckSettings)
-    nado: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
-        name="Nado",
-        base_url=os.getenv("NADO_BASE_URL", "https://archive.test.nado.xyz"),
-        # 支持自定义超时（可通过环境变量覆盖）
-        timeout=_env_float("NADO_HTTP_TIMEOUT", 10.0),
-        symbol_overrides={
-            "BTC-PERP_USDT0": "BTCUSDT",
-            "ETH-PERP_USDT0": "ETHUSDT",
-            "BNB-PERP_USDT0": "BNBUSDT",
-            "SOL-PERP_USDT0": "SOLUSDT",
-        },
-        symbol_pattern=r"^([A-Z0-9]+)-PERP_USDT\d+$",
-        price_endpoint=Endpoint(
-            method="GET",
-            path="/v2/tickers",
-            params={"market": "perp"},
-            response_path=[],
-            symbol_key="ticker_id",
-            price_key="last_price",
-            funding_key="funding_rate_24h",
-            volume_key="quote_volume",
-        ),
-        taker_bps=_env_float("NADO_TAKER_FEE_BPS", 3.5),  # Nado: 0.01% maker / 0.035% taker
-    ))
     variational: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
         name="Variational",
         base_url=os.getenv("VARIATIONAL_BASE_URL", "https://omni.variational.io"),
@@ -383,74 +357,26 @@ class Settings:
         },
         min_volume_usd=_env_float("ASTER_MIN_VOLUME_USD", 0.0),
     ))
-    backpack: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
-        name="Backpack",
-        base_url=os.getenv("BACKPACK_BASE_URL", "https://api.backpack.exchange"),
-        timeout=_env_float("BACKPACK_HTTP_TIMEOUT", 10.0),
-        symbol_overrides={},
-        # Backpack uses BTC_USDC_PERP format in tickers
-        symbol_pattern=r"^([A-Z0-9]+)_USDC_PERP$",
-        price_endpoint=Endpoint(
-            method="GET",
-            path="/api/v1/tickers",
-            symbol_key="symbol",
-            price_key="lastPrice",
-            volume_key="quoteVolume",
-        ),
-        funding_endpoint=Endpoint(
-            method="GET",
-            path="/api/v1/markPrices",
-            symbol_key="symbol",
-            funding_key="fundingRate",
-        ),
-        taker_bps=5.0,  # Backpack: 0.02% maker / 0.05% taker
+    arcus: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
+        name="Arcus",
+        base_url=os.getenv("ARCUS_BASE_URL", "https://api.arcus.xyz"),
+        timeout=_env_float("ARCUS_HTTP_TIMEOUT", 10.0),
+        taker_bps=_env_float("ARCUS_TAKER_FEE_BPS", 2.25),
+        min_volume_usd=_env_float("ARCUS_MIN_VOLUME_USD", 0.0),
     ))
-    grvt: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
-        name="Grvt",
-        base_url=os.getenv("GRVT_BASE_URL", "https://market-data.grvt.io"),
-        timeout=_env_float("GRVT_HTTP_TIMEOUT", 10.0),
-        symbol_overrides={},
-        symbol_pattern=r"^([A-Z0-9]+)_([A-Z0-9]+)_Perp$",
-        price_endpoint=Endpoint(
-            method="POST",
-            path="/full/v1/mini",
-            symbol_key="instrument",
-            price_key="mark_price",
-        ),
-        funding_endpoint=Endpoint(
-            method="POST",
-            path="/full/v1/funding",
-            symbol_key="instrument",
-            funding_key="funding_rate",
-        ),
-        taker_bps=4.5,  # GRVT: -0.0001% maker / 0.045% taker
+    bulk: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
+        name="Bulk",
+        base_url=os.getenv("BULK_BASE_URL", "https://exchange-api.bulk.trade"),
+        timeout=_env_float("BULK_HTTP_TIMEOUT", 10.0),
+        taker_bps=_env_float("BULK_TAKER_FEE_BPS", 3.5),
+        min_volume_usd=_env_float("BULK_MIN_VOLUME_USD", 0.0),
     ))
-    ondoperps: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
-        name="OndoPerps",
-        base_url=os.getenv("ONDOPERPS_BASE_URL", "https://api.ondoperps.xyz"),
-        timeout=_env_float("ONDOPERPS_HTTP_TIMEOUT", 10.0),
-        symbol_overrides={},
-        symbol_pattern=r"^([A-Z0-9]+)-USD\.P$",
-        price_endpoint=Endpoint(
-            method="GET",
-            path="/v1/perps/contracts",
-            response_path=["result"],
-            symbol_key="market",
-            price_key="lastPrice",
-            funding_key="nextFundingRate",
-            volume_key="quoteVolume",
-        ),
-        taker_bps=_env_float("ONDOPERPS_TAKER_FEE_BPS", 3.5),  # OndoPerps: 0.015% maker / 0.035% taker
-        extra_headers={
-            "Accept": "application/json",
-            "Referer": "https://app.ondoperps.xyz/",
-            "Origin": "https://app.ondoperps.xyz",
-            "User-Agent": os.getenv(
-                "ONDOPERPS_USER_AGENT",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
-            ),
-        },
-        min_volume_usd=_env_float("ONDOPERPS_MIN_VOLUME_USD", 0.0),
+    risex: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
+        name="RISEx",
+        base_url=os.getenv("RISEX_BASE_URL", "https://api.rise.trade"),
+        timeout=_env_float("RISEX_HTTP_TIMEOUT", 10.0),
+        taker_bps=_env_float("RISEX_TAKER_FEE_BPS", 3.0),
+        min_volume_usd=_env_float("RISEX_MIN_VOLUME_USD", 0.0),
     ))
 
     @property
@@ -459,13 +385,12 @@ class Settings:
         return {
             "binance": self.binance,
             "variational": self.variational,
-            "nado": self.nado,
             "hyperliquid": self.hyperliquid,
             "aster": self.aster,
             "lighter": self.lighter,
-            "backpack": self.backpack,
-            "grvt": self.grvt,
-            "ondoperps": self.ondoperps,
+            "arcus": self.arcus,
+            "bulk": self.bulk,
+            "risex": self.risex,
         }
 
     def save_runtime_config(self):

@@ -14,7 +14,6 @@ sys.path.insert(0, r'd:\code-web3\DEX\var-arbitrage_v1.6')
 from position_tracker import check_exit_signals
 from notifier import _format_exit_alerts, _format_text
 from analyzer import analyse_markets
-from collectors.ondoperps import OndoPerpsCollector
 from collectors.aster import AsterCollector
 from collectors.factory import create_collector
 from config import Settings
@@ -75,43 +74,6 @@ class FakeResponse:
         return self._payload
 
 
-class FakeOndoClient:
-    async def request(self, **_kwargs):
-        return FakeResponse({
-            "success": True,
-            "result": [
-                {
-                    "market": "CRCL-USD.P",
-                    "disabled": False,
-                    "lastPrice": "66.54",
-                    "bid": "66.51",
-                    "ask": "66.55",
-                    "quoteVolume": "471688.752",
-                    "fundingRate": "-0.0001634",
-                    "nextFundingRate": "0.0000023",
-                    "nextFundingRateTimestamp": "2026-07-04T14:00:00Z",
-                },
-                {
-                    "market": "ZERO-USD.P",
-                    "disabled": False,
-                    "lastPrice": "10",
-                    "bid": "9.9",
-                    "ask": "10.1",
-                    "quoteVolume": "1000000",
-                    "fundingRate": "-0.001",
-                    "nextFundingRate": "0",
-                },
-                {
-                    "market": "BTC-USD.P",
-                    "disabled": True,
-                    "lastPrice": "60000",
-                    "quoteVolume": "1000000",
-                    "nextFundingRate": "0.0001",
-                },
-            ],
-        })
-
-
 class FakeAsterClient:
     async def get(self, path):
         if path == "/fapi/v1/ticker/24hr":
@@ -163,29 +125,6 @@ class FakeAsterClient:
                 {"symbol": "BTCUSDT", "fundingIntervalHours": 1},
             ])
         raise AssertionError(f"unexpected path: {path}")
-
-
-class TestOndoPerpsCollector(unittest.IsolatedAsyncioTestCase):
-    async def test_contracts_are_normalized_with_next_funding_rate(self):
-        collector = OndoPerpsCollector(Settings().ondoperps)
-        collector._client = FakeOndoClient()
-
-        markets = await collector.fetch_markets(["CRCLUSDT", "ZEROUSDT", "BTCUSDT"])
-
-        self.assertIn("CRCLUSDT", markets)
-        self.assertNotIn("BTCUSDT", markets)
-
-        crcl = markets["CRCLUSDT"]
-        self.assertEqual(crcl.exchange, "OndoPerps")
-        self.assertEqual(crcl.price, 66.54)
-        self.assertEqual(crcl.best_bid, 66.51)
-        self.assertEqual(crcl.best_ask, 66.55)
-        self.assertEqual(crcl.volume_24h, 471688.752)
-        self.assertEqual(crcl.native_interval_hours, 1)
-        self.assertEqual(crcl.funding_rate, 0.0000023)
-        self.assertEqual(crcl.next_funding_time, 1783173600000.0)
-
-        self.assertEqual(markets["ZEROUSDT"].funding_rate, 0.0)
 
 
 class TestAsterCollector(unittest.IsolatedAsyncioTestCase):
@@ -1287,21 +1226,6 @@ class TestEntryCheckRouteCapability(unittest.TestCase):
 
         self.assertTrue(opportunities[0].details["entry_check_supported"])
         self.assertFalse(opportunities[1].details["entry_check_supported"])
-
-
-class TestGrvtCollectorFailures(unittest.IsolatedAsyncioTestCase):
-    class FailingSession:
-        async def post(self, *_args, **_kwargs):
-            raise RuntimeError("GRVT instruments unavailable")
-
-    async def test_instrument_fetch_error_reaches_api_health_tracking(self):
-        from collectors.grvt import GrvtCollector
-
-        collector = GrvtCollector(Settings().grvt)
-        collector._session = self.FailingSession()
-
-        with self.assertRaisesRegex(RuntimeError, "GRVT instruments unavailable"):
-            await collector.fetch_markets([])
 
 
 if __name__ == '__main__':

@@ -1,11 +1,10 @@
 {
     "binance": true,
     "variational": true,
-    "nado": true,
     "hyperliquid": true,
     "aster": true,
     "lighter": true,
-    "backpack": true,
-    "grvt": true,
-    "ondoperps": true
+    "arcus": true,
+    "bulk": true,
+    "risex": true
 }

@@ -6,7 +6,8 @@ from typing import Any, Dict
 
 def stamp_market_timestamps(data: Dict[str, Any], fetched_at: float) -> None:
     for market in data.values():
-        market.timestamp = fetched_at
+        if market.timestamp is None:
+            market.timestamp = fetched_at
 
 
 def replace_exchange_snapshot(
@@ -43,19 +44,30 @@ def dashboard_snapshot(
         for key, value in source.get("exchange_status", {}).items()
     }
     stale_exchanges = set()
+    raw_data = source.get("raw_exchanges_data", {})
+    stale_markets = {
+        (symbol, exchange)
+        for exchange, data in raw_data.items()
+        for symbol, market in data.items()
+        if market_stale_seconds and (
+            market.timestamp is None or now - market.timestamp > market_stale_seconds
+        )
+    }
     for key, status in statuses.items():
         if status.get("state") != "fresh":
             continue
         last_success_at = status.get("last_success_at")
+        data = raw_data.get(key, {})
         if market_stale_seconds and (
             last_success_at is None or now - last_success_at > market_stale_seconds
+            or (data and all((symbol, key) in stale_markets for symbol in data))
         ):
             status["state"] = "stale"
             stale_exchanges.add(key)
 
     markets = {
         symbol: {
-            exchange: None if exchange in stale_exchanges else market
+            exchange: None if exchange in stale_exchanges or (symbol, exchange) in stale_markets else market
             for exchange, market in market_set.items()
         }
         for symbol, market_set in source.get("markets", {}).items()
@@ -65,12 +77,21 @@ def dashboard_snapshot(
         for opportunity in source.get("opportunities", [])
         if str(opportunity.get("details", {}).get("buy_exchange", "")).lower() not in stale_exchanges
         and str(opportunity.get("details", {}).get("sell_exchange", "")).lower() not in stale_exchanges
+        and all(
+            (opportunity.get("symbol"), str(opportunity.get("details", {}).get(leg, "")).lower()) not in stale_markets
+            for leg in ("buy_exchange", "sell_exchange")
+        )
     ]
+    reasons = dict(source.get("reasons", {}))
+    remaining_symbols = {opportunity.get("symbol") for opportunity in opportunities}
+    for symbol, _ in stale_markets:
+        if symbol in markets and symbol not in remaining_symbols:
+            reasons[symbol] = "STALE_DATA"
 
     return {
         "markets": markets,
         "opportunities": opportunities,
-        "reasons": source.get("reasons", {}),
+        "reasons": reasons,
         "symbol_max_intervals": source.get("symbol_max_intervals", {}),
         "last_update": source.get("last_update", "Never"),
         "data_version": source.get("data_version", 0),

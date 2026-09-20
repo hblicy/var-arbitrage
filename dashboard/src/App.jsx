@@ -9,7 +9,7 @@ import {
 const STORAGE_KEY = 'arbitrage_exchange_prefs';
 const MIN_EXCHANGES_REQUIRED = 2;
 const POLL_INTERVAL_MS = 10000;
-const DEFAULT_EXCHANGES = ['binance', 'variational', 'nado', 'hyperliquid', 'aster', 'lighter', 'backpack', 'grvt', 'ondoperps'];
+const DEFAULT_EXCHANGES = ['binance', 'variational', 'hyperliquid', 'aster', 'lighter', 'arcus', 'bulk', 'risex'];
 const EMPTY_DASHBOARD_DATA = {
   markets: {},
   opportunities: [],
@@ -35,6 +35,7 @@ const getDashboardSignature = (item) => [
   item.data_version,
   item.last_update,
   Object.keys(item.markets || {}).length,
+  JSON.stringify(item.markets || {}),
   (item.opportunities || []).length,
   Object.entries(item.exchange_status || {})
     .sort(([left], [right]) => left.localeCompare(right))
@@ -44,7 +45,9 @@ const getDashboardSignature = (item) => [
 
 const EXCHANGE_LABELS = {
   aster: 'Aster',
-  ondoperps: 'OndoPerps',
+  arcus: 'Arcus',
+  bulk: 'Bulk',
+  risex: 'RISEx',
 };
 
 const formatExchangeName = (name) => EXCHANGE_LABELS[name] || name.charAt(0).toUpperCase() + name.slice(1);

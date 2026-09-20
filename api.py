@@ -16,7 +16,6 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config import settings
-from collectors.nado import NadoCollector
 from collectors.variational import VariationalCollector
 from collectors.binance import BinanceCollector
 from analyzer import analyse_markets
@@ -197,7 +196,7 @@ async def lifespan(_app: FastAPI):
         await shutdown_event()
 
 
-app = FastAPI(title="Nado-Variational Arbitrage Monitor", lifespan=lifespan)
+app = FastAPI(title="Cross-Exchange Arbitrage Monitor", lifespan=lifespan)
 
 # Enable CORS for frontend development
 app.add_middleware(
@@ -266,7 +265,7 @@ async def evaluate_manual_entry(symbol: str, long_exchange: str, short_exchange:
 
     async def fetch_book(fetcher):
         book = await fetcher(symbol, settings.entry_check.book_depth_limit)
-        return book, time.time()
+        return book, book.get("timestamp", time.time())
 
     try:
         (buy_book, buy_quoted_at), (sell_book, sell_quoted_at) = await asyncio.gather(

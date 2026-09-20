@@ -4,17 +4,36 @@
 
 ## 🔹 支持的交易所
 
-- **Nado** (`nado`)
 - **Variational** (`variational`) - 支持基于网页分析的零滑点监控
 - **Binance** (`binance`) - 作为流动性最大基准
 - **Lighter** (`lighter`)
 - **Hyperliquid** (`hyperliquid`) - **NEW in v1.6!** 深度流动性，1h 资金费率结算
 - **Aster** (`aster`) - REST API 版，吃单费率按 0.04% 计算
-- **Backpack** (`backpack`)
-- **GRVT** (`grvt`)
-- **OndoPerps** (`ondoperps`) - REST API 版
+- **Arcus** (`arcus`) - 公开 REST，1h 资金费率、L2 盘口复核
+- **Bulk** (`bulk`) - 公开 REST，整点 1h 资金费率、L2 盘口复核
+- **RISEx** (`risex`) - 公开 REST，按市场返回的资金费周期、L2 盘口复核
 
 *(在 v1.6 中，Paradex 被移除并替换为 Hyperliquid，以获得更大的日均交易量和更好的价差捕捉能力。)*
+
+本次移除 Nado、GRVT、OndoPerps、Backpack。旧 `exchange_configs.json` 中的这些键会被忽略，旧浏览器偏好也不会恢复已移除的交易所。历史持仓和结算记录不删除，但移除所的行情不再更新。
+
+### Arcus / Bulk / RISEx 接入说明
+
+三家均使用公开接口，无需交易 API Key。沿用当前只读监控和人工盘口复核流程，不会自动下单。
+
+| 交易所 | 默认吃单费率 | 资金费率字段 | 24h 成交额字段 |
+| --- | --- | --- | --- |
+| Arcus | 2.25 bps（0.0225%） | `nextFundingRate`，1h | `volume24hNotional` |
+| Bulk | 3.5 bps（0.035%） | `fundingRate`，1h | `quoteVolume` |
+| RISEx | 3.0 bps（0.03%） | `current_funding_rate`，周期由接口给出 | `quote_volume_24h` |
+
+费率按 2026-09-20 的标准账户口径设置，可用 `ARCUS_TAKER_FEE_BPS`、`BULK_TAKER_FEE_BPS`、`RISEX_TAKER_FEE_BPS` 覆盖实际账户费用。依据：[Arcus 主网费率表](https://api.arcus.xyz/v1/feeTiers)、[Bulk 官方费率](https://docs.bulk.trade/bulk-exchange/fees)、[RISEx 官方费率](https://docs.risechain.com/docs/risex/trading/fees)。
+
+- Arcus 缺少预测资金费率时显示缺失，不拿已结算费率替代；RISEx 不使用已废弃的 `predicted_funding_rate`，也不把 `funding_rate_8h` 当成小时费率再次放大。
+- RISEx 采集使用 `force_refresh=true` 绕过默认 5 分钟市场缓存。Bulk 的 REST 盘口参数是小写 `type=l2book`。
+- 原始币种保留映射到现有 `BTCUSDT` 等统一键；成交额使用 USD/USDC 名义金额，资金费率保留正负号与真实零值。
+- Arcus / Bulk 盘口按源时间戳检查新鲜度；RISEx REST 盘口不返回源时间戳，现有复核按请求完成时间检查时效。空盘口不会用标记价格伪造，接口失败会进入现有交易所错误状态。
+- 更新部署后重启后端并重新构建前端。对照 `env.example` 补充三家配置即可；原 `NADO_VARIATIONAL_WECHAT_WEBHOOK` 名称继续保留，避免现有推送配置失效。
 
 ## 🔹 核心功能
 
