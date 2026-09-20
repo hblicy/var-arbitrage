@@ -20,6 +20,7 @@ from config import Settings, settings
 from entry_check import annotate_entry_check_support
 from notifier import WeChatNotifier
 from market_state import stamp_market_timestamps
+from funding_monitor import FundingMonitor
 from position_tracker import accumulate_funding, update_pre_settlement_rates
 
 if sys.platform == "win32":
@@ -36,6 +37,7 @@ async def run_cycle(
     cfg: Settings,
     collectors: Dict[str, MarketCollector],
     notifier: WeChatNotifier,
+    funding_monitor: FundingMonitor | None = None,
 ) -> None:
     symbols = cfg.tracked_symbols
 
@@ -55,6 +57,7 @@ async def run_cycle(
 
     # Dyamically discover common symbols if none tracked
     if not symbols:
+        symbols_to_analyze = []
         # Find intersection of all non-empty market data keys
         market_sets = [set(data.keys()) for data in exchanges_data.values() if data]
         if market_sets:
@@ -64,15 +67,16 @@ async def run_cycle(
                 symbols_to_analyze = sorted(list(common_symbols))
             else:
                 logger.warning("未自发现共同交易对。")
-                return
         else:
             logger.warning("所有交易所数据均为空。")
-            return
     else:
         symbols_to_analyze = symbols
 
     opportunities, _, _ = analyse_markets(symbols_to_analyze, exchanges_data, cfg)
     annotate_entry_check_support(opportunities, collectors)
+    if funding_monitor is not None:
+        await funding_monitor.process(opportunities, exchanges_data, collectors, on_triggered=notifier.send)
+        opportunities = [opp for opp in opportunities if opp.details['funding_strategy']['status'] == 'triggered']
     if opportunities:
         logger.info("发现 %d 个套利机会", len(opportunities))
         for opp in opportunities:
@@ -82,7 +86,8 @@ async def run_cycle(
                 opp.direction,
                 opp.net_spread_bps,
             )
-        await notifier.send(opportunities)
+        if funding_monitor is None:
+            await notifier.send(opportunities)
     else:
         logger.info("暂无满足条件的套利机会。")
 
@@ -146,6 +151,7 @@ async def main() -> None:
             logger.error(f"初始化交易所 {key} 失败: {e}")
 
     notifier = WeChatNotifier(cfg.notifications)
+    funding_monitor = FundingMonitor(cfg)
 
     try:
         # 并行启动: 主扫描循环 + 资金费结算循环
@@ -154,7 +160,7 @@ async def main() -> None:
         )
         
         while True:
-            await run_cycle(cfg, collectors, notifier)
+            await run_cycle(cfg, collectors, notifier, funding_monitor)
             await asyncio.sleep(cfg.schedule.interval_seconds)
     finally:
         funding_task.cancel()

@@ -81,6 +81,7 @@ class BulkCollector(MarketCollector):
             best_bid=book["bids"][0][0] if book["bids"] else None,
             best_ask=book["asks"][0][0] if book["asks"] else None,
             next_funding_time=(math.floor(timestamp / 1e9 / 3600) + 1) * 3600 * 1000,
+            next_funding_time_source="utc_estimate",
         )
 
     async def fetch_order_book(self, symbol: str, limit: int) -> dict:

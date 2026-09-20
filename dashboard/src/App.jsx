@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import PositionsModal from './PositionsModal';
+import FundingRadar from './FundingRadar';
 import {
   getObservationDisplay,
   partitionOpportunities,
@@ -331,6 +332,7 @@ const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, sym
 });
 
 function App() {
+  const [strategyView, setStrategyView] = useState(true);
   const [data, setData] = useState(EMPTY_DASHBOARD_DATA);
   const [exchangeStates, setExchangeStates] = useState([]);
   const [entryChecks, setEntryChecks] = useState({});
@@ -592,6 +594,11 @@ function App() {
           </div>
         )}
 
+      <nav className="strategy-tabs" aria-label="监控视图">
+        <button type="button" aria-pressed={strategyView} onClick={() => setStrategyView(true)}>资金费策略</button>
+        <button type="button" aria-pressed={!strategyView} onClick={() => setStrategyView(false)}>原始机会 / 价差复核</button>
+      </nav>
+      {strategyView ? <FundingRadar enabledExchanges={enabledExchangeSet} /> : <>
       <div className="stats-grid">
         <div className="stats-card">
           <div className="stat-label">监控市场</div>
@@ -644,6 +651,7 @@ function App() {
       </div>
 
       <ObservationPool opportunities={observationOpportunities} />
+      </>}
 
       <PositionsModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
     </div>
