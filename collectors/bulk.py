@@ -15,6 +15,10 @@ from models import MarketDatum
 logger = logging.getLogger(__name__)
 
 
+class _StaleMarketData(ValueError):
+    pass
+
+
 class BulkCollector(MarketCollector):
     def __init__(self, settings: ExchangeSettings) -> None:
         super().__init__(settings)
@@ -43,8 +47,16 @@ class BulkCollector(MarketCollector):
     async def fetch_markets(self, symbols: Iterable[str]) -> Dict[str, MarketDatum]:
         requested = set(symbols)
         await self._load_markets()
+
+        async def fresh_market(symbol, native):
+            try:
+                return await self._market(symbol, native)
+            except _StaleMarketData as exc:
+                logger.warning("Skipping Bulk market %s: %s", symbol, exc)
+                return None
+
         markets = await self._gather_with_semaphore([
-            self._market(symbol, native) for symbol, native in self._symbols.items()
+            fresh_market(symbol, native) for symbol, native in self._symbols.items()
             if (not requested or symbol in requested) and symbol not in self.settings.excluded_symbols
         ])
         result = {market.symbol: market for market in markets if market is not None}
@@ -64,7 +76,7 @@ class BulkCollector(MarketCollector):
             raise ValueError(f"Bulk {symbol}: missing ticker timestamp")
         age = time.time() - timestamp / 1e9
         if (app_settings.schedule.market_stale_seconds and age > app_settings.schedule.market_stale_seconds) or age < -5:
-            raise ValueError(f"Bulk {symbol}: stale ticker ({age:.1f}s)")
+            raise _StaleMarketData(f"Bulk {symbol}: stale ticker ({age:.1f}s)")
         volume = _number(row["quoteVolume"])
         if self.settings.min_volume_usd is not None and volume is not None and volume < self.settings.min_volume_usd:
             return None
@@ -103,7 +115,7 @@ class BulkCollector(MarketCollector):
             raise ValueError(f"Bulk {symbol}: missing book timestamp")
         age_ms = (time.time() - timestamp / 1e9) * 1000
         if age_ms > app_settings.entry_check.max_quote_age_ms or age_ms < -5000:
-            raise ValueError(f"Bulk {symbol}: stale order book ({age_ms:.0f} ms)")
+            raise _StaleMarketData(f"Bulk {symbol}: stale order book ({age_ms:.0f} ms)")
         bids, asks = payload["levels"]
         book = {"bids": _levels(bids, reverse=True), "asks": _levels(asks, reverse=False)}
         if book["bids"] and book["asks"] and book["bids"][0][0] >= book["asks"][0][0]:
