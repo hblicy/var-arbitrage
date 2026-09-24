@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from curl_cffi.requests.exceptions import HTTPError
+
 from analyzer import analyse_markets
 from collectors.factory import create_collector
 from config import NotificationSettings, Settings
@@ -42,11 +44,13 @@ BULK_TICKER = {
 
 
 class Response:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200):
         self.payload = payload
+        self.status_code = status_code
 
     def raise_for_status(self):
-        pass
+        if self.status_code >= 400:
+            raise HTTPError(f"HTTP Error {self.status_code}: ", response=self)
 
     def json(self):
         return copy.deepcopy(self.payload)
@@ -235,6 +239,44 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("MONUSDT", " ".join(logs.output))
                     stale = False
                     self.assertEqual(set(await collector.fetch_markets([])), {"SOLUSDT", "MONUSDT"})
+
+    async def test_bulk_missing_book_skips_only_that_market(self):
+        collector = self.collector("bulk")
+        original_get = collector._client.get
+
+        async def get(path, params=None):
+            if path == "/api/v1/exchangeInfo":
+                return Response([BULK_MARKET, {**BULK_MARKET, "symbol": "PUMP-USD", "baseAsset": "PUMP"}])
+            if path == "/api/v1/ticker/PUMP-USD":
+                return Response({**BULK_TICKER, "symbol": "PUMP-USD"})
+            if path == "/api/v1/l2book" and params["coin"] == "PUMP-USD":
+                return Response({}, status_code=404)
+            return await original_get(path, params)
+
+        with patch.object(collector._client, "get", side_effect=get):
+            with self.assertLogs("collectors.bulk", level="WARNING") as logs:
+                markets = await collector.fetch_markets([])
+            self.assertEqual(set(markets), {"SOLUSDT"})
+            self.assertIn("PUMPUSDT", " ".join(logs.output))
+            status = {}
+            replace_exchange_snapshot({}, status, key="bulk", data=markets, fetched_at=NOW, error=None)
+            self.assertEqual(status["bulk"]["state"], "fresh")
+            with self.assertRaises(HTTPError):
+                await collector.fetch_order_book("PUMPUSDT", 1)
+
+    async def test_bulk_book_server_error_still_fails_the_scan(self):
+        collector = self.collector("bulk")
+        original_get = collector._client.get
+
+        async def get(path, params=None):
+            if path == "/api/v1/l2book":
+                return Response({}, status_code=500)
+            return await original_get(path, params)
+
+        with patch.object(collector._client, "get", side_effect=get):
+            with self.assertRaises(HTTPError) as error:
+                await collector.fetch_markets(["SOLUSDT"])
+        self.assertEqual(error.exception.response.status_code, 500)
 
     async def test_bulk_all_stale_markets_return_empty_without_reusing_old_data(self):
         collector = self.collector("bulk")

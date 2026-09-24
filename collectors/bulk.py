@@ -6,6 +6,8 @@ import math
 import time
 from typing import Dict, Iterable
 
+from curl_cffi.requests.exceptions import HTTPError
+
 from collectors.base import MarketCollector
 from collectors.decorators import with_retry
 from collectors.session_pool import session_pool
@@ -85,7 +87,13 @@ class BulkCollector(MarketCollector):
             price = _number(row["markPrice"])
         if price is None or price <= 0:
             raise ValueError(f"Bulk {symbol}: invalid price")
-        book = await self.fetch_order_book(symbol, 1)
+        try:
+            book = await self.fetch_order_book(symbol, 1)
+        except HTTPError as exc:
+            if exc.response is None or exc.response.status_code != 404:
+                raise
+            logger.warning("Skipping Bulk market %s: order book unavailable (HTTP 404)", symbol)
+            return None
         return MarketDatum(
             symbol=symbol, price=price, funding_rate=_number(row.get("fundingRate")),
             timestamp=min(collected_at, timestamp / 1e9),
