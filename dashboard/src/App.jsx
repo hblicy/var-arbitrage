@@ -11,6 +11,16 @@ const STORAGE_KEY = 'arbitrage_exchange_prefs';
 const MIN_EXCHANGES_REQUIRED = 2;
 const POLL_INTERVAL_MS = 10000;
 const DEFAULT_EXCHANGES = ['binance', 'variational', 'hyperliquid', 'aster', 'lighter', 'arcus', 'bulk', 'risex', 'txflow', 'qfex', 'popdex'];
+const loadExchangeStates = (names) => {
+  let savedPrefs = {};
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) savedPrefs = saved;
+  } catch (err) {
+    console.warn('Could not read saved exchange preferences:', err);
+  }
+  return names.map(name => ({ name, enabled: typeof savedPrefs[name] === 'boolean' ? savedPrefs[name] : true }));
+};
 const EMPTY_DASHBOARD_DATA = {
   markets: {},
   opportunities: [],
@@ -351,13 +361,16 @@ const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, sym
 function App() {
   const [strategyView, setStrategyView] = useState(true);
   const [data, setData] = useState(EMPTY_DASHBOARD_DATA);
-  const [exchangeStates, setExchangeStates] = useState([]);
+  const [exchangeStates, setExchangeStates] = useState(() => loadExchangeStates(DEFAULT_EXCHANGES));
+  const [exchangeError, setExchangeError] = useState(null);
   const [entryChecks, setEntryChecks] = useState({});
   const [error, setError] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const isModalOpenRef = useRef(false);
   const wasModalOpenRef = useRef(false);
   const abortControllerRef = useRef(null);
+  const exchangeAbortRef = useRef(null);
+  const exchangeLoadedRef = useRef(false);
 
   const fetchData = useCallback(async ({ force = false } = {}) => {
     if (abortControllerRef.current && !abortControllerRef.current.signal.aborted && !force) return;
@@ -393,46 +406,51 @@ function App() {
     }
   }, []);
 
-  useEffect(() => {
-    const fetchExchanges = async () => {
-      try {
-        const response = await fetch('/api/exchanges');
-        if (!response.ok) return;
-
-        const serverExchanges = await response.json();
-        let savedPrefs = {};
-        try {
-          const saved = localStorage.getItem(STORAGE_KEY);
-          if (saved) savedPrefs = JSON.parse(saved);
-        } catch (e) {
-          console.warn('Could not parse saved preferences:', e);
-        }
-
-        const merged = serverExchanges.map(ex => ({
-          name: ex.name,
-          enabled: savedPrefs[ex.name] !== undefined ? savedPrefs[ex.name] : true,
-        }));
-
-        setExchangeStates(merged);
-      } catch (err) {
-        console.error('Failed to fetch exchanges:', err);
+  const fetchExchanges = useCallback(async () => {
+    if (exchangeAbortRef.current && !exchangeAbortRef.current.signal.aborted) return;
+    const controller = new AbortController();
+    exchangeAbortRef.current = controller;
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 30000);
+    try {
+      const response = await fetch('/api/exchanges', { cache: 'no-store', signal: controller.signal });
+      if (!response.ok) throw new Error(`Exchange list request failed: HTTP ${response.status}`);
+      const serverExchanges = await response.json();
+      if (!Array.isArray(serverExchanges) || !serverExchanges.length ||
+          serverExchanges.some(ex => !ex || typeof ex.name !== 'string' || !ex.name)) {
+        throw new Error('Invalid exchange list response');
       }
-    };
+      if (exchangeAbortRef.current !== controller) return;
+      setExchangeStates(loadExchangeStates(serverExchanges.map(ex => ex.name)));
+      exchangeLoadedRef.current = true;
+      setExchangeError(null);
+    } catch (err) {
+      if (exchangeAbortRef.current !== controller || (err.name === 'AbortError' && !timedOut)) return;
+      setExchangeError(timedOut ? '交易所列表加载超时，已保留本地选项，将自动重试。' : '交易所列表加载失败，已保留本地选项，将自动重试。');
+      console.error('Failed to fetch exchanges:', err);
+    } finally {
+      clearTimeout(timeout);
+      if (exchangeAbortRef.current === controller) exchangeAbortRef.current = null;
+    }
+  }, []);
 
+  useEffect(() => {
     fetchExchanges();
     fetchData({ force: true });
 
     const intervalId = window.setInterval(() => {
       if (!isModalOpenRef.current && !document.hidden) {
         fetchData();
+        if (!exchangeLoadedRef.current) fetchExchanges();
       }
     }, POLL_INTERVAL_MS);
 
     return () => {
       abortControllerRef.current?.abort();
+      exchangeAbortRef.current?.abort();
       window.clearInterval(intervalId);
     };
-  }, [fetchData]);
+  }, [fetchData, fetchExchanges]);
 
   useEffect(() => {
     isModalOpenRef.current = isModalOpen;
@@ -609,6 +627,7 @@ function App() {
       </header>
 
         {error && <div className="error-banner">{error}</div>}
+        {exchangeError && <div className="error-banner" role="alert">{exchangeError} <button type="button" onClick={fetchExchanges}>重试</button></div>}
         {unavailableExchanges.length > 0 && (
           <div className="stale-banner">
             已排除：{unavailableExchanges.join('、')}；不会沿用旧行情计算机会。
