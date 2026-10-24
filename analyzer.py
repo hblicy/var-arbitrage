@@ -4,8 +4,9 @@ from __future__ import annotations
 from typing import Dict, Iterable, List, Tuple
 import time
 
-from config import Settings, settings
+from config import Settings, get_taker_fee_bps, settings
 from models import ArbitrageOpportunity, MarketDatum
+from funding_strategy import FundingScheduleUncertain, settlement_schedule
 def analyse_markets(
     symbols: Iterable[str],
     exchanges_data: Dict[str, Dict[MarketDatum]],
@@ -49,6 +50,10 @@ def analyse_markets(
                 m_b = exchanges_data[name_b].get(sym)
                 
                 if not m_a or not m_b:
+                    continue
+
+                if m_a.quote_currency != m_b.quote_currency:
+                    reasons[sym] = "QUOTE_CURRENCY_MISMATCH"
                     continue
 
                 found_any_pair = True
@@ -169,9 +174,9 @@ def _evaluate_direction(
     sell_fee = 5.0
     exchanges = cfg.exchanges
     if buy_exchange.lower() in exchanges:
-        buy_fee = exchanges[buy_exchange.lower()].taker_bps
+        buy_fee = get_taker_fee_bps(exchanges[buy_exchange.lower()], symbol)
     if sell_exchange.lower() in exchanges:
-        sell_fee = exchanges[sell_exchange.lower()].taker_bps
+        sell_fee = get_taker_fee_bps(exchanges[sell_exchange.lower()], symbol)
     
     estimated_slippage_bps = max(0.0, reference_spread_bps - gross_bps)
     fallback_slippage_bps = buy_fallback_slippage + sell_fallback_slippage
@@ -208,13 +213,30 @@ def _evaluate_direction(
 
     # Normalize funding to 24h for consistent threshold comparison
     funding_bps_24h = funding_bps * (24 / base_interval) if base_interval > 0 else 0
-    funding_hourly_bps = funding_bps / base_interval if base_interval > 0 else 0
+    session_limited = buy.funding_hours is not None or sell.funding_hours is not None
+    funding_projection_reason = None
+    if funding_diff is None:
+        funding_projection_reason = 'FUNDING_UNAVAILABLE'
+        funding_bps_24h = None
+    if session_limited and funding_diff is not None:
+        try:
+            now = time.time()
+            buy_count = settlement_schedule(buy, now, 24)['count']
+            sell_count = settlement_schedule(sell, now, 24)['count']
+            funding_bps_24h = (sell.funding_rate * sell_count - buy.funding_rate * buy_count) * 10000
+        except FundingScheduleUncertain:
+            funding_projection_reason = 'FUNDING_SCHEDULE_UNCERTAIN'
+            funding_bps_24h = None
+        except ValueError:
+            funding_projection_reason = 'FUNDING_SCHEDULE_INVALID'
+            funding_bps_24h = None
+    funding_hourly_bps = funding_bps / base_interval if funding_diff is not None and base_interval > 0 else None
     price_cost_bps = max(0.0, -net_spread_bps)
     price_edge_bps = max(0.0, net_spread_bps)
     cover_hours = None
-    if price_cost_bps > 0 and funding_hourly_bps > 0:
+    if not session_limited and price_cost_bps > 0 and funding_hourly_bps is not None and funding_hourly_bps > 0:
         cover_hours = price_cost_bps / funding_hourly_bps
-    projected_24h_bps = net_spread_bps + funding_bps_24h
+    projected_24h_bps = net_spread_bps + funding_bps_24h if funding_bps_24h is not None else None
     dashboard_max_cover_hours = getattr(cfg.thresholds, "dashboard_max_cover_hours", 24.0)
 
     # Keep threshold result as metadata only. The dashboard shows every
@@ -236,7 +258,7 @@ def _evaluate_direction(
         buy,
         sell,
         net_spread_bps,
-        funding_bps_24h,
+        funding_bps_24h if funding_bps_24h is not None else 0,
         cfg,
         suggest_limit_order,
         executable_gross_bps=gross_bps,
@@ -284,6 +306,7 @@ def _evaluate_direction(
         "funding_daily_bps": funding_bps_24h,
         "cover_hours": cover_hours,
         "projected_24h_bps": projected_24h_bps,
+        "funding_projection_reason": funding_projection_reason,
         "opportunity_type": _classify_opportunity(net_spread_bps, funding_hourly_bps, cover_hours),
         "meets_dashboard_threshold": meets_dashboard_threshold,
         "native_intervals": {
@@ -316,10 +339,10 @@ def _spread_ratio(sell_price: float, buy_price: float) -> float:
 
 def _classify_opportunity(
     net_spread_bps: float,
-    funding_hourly_bps: float,
+    funding_hourly_bps: float | None,
     cover_hours: float | None,
 ) -> str:
-    if net_spread_bps >= 0 and funding_hourly_bps > 0:
+    if net_spread_bps >= 0 and funding_hourly_bps is not None and funding_hourly_bps > 0:
         return "aligned"
     if net_spread_bps < 0 and cover_hours is not None:
         return "funding_cover"

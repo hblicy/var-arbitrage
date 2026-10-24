@@ -6,5 +6,8 @@
     "lighter": true,
     "arcus": true,
     "bulk": true,
-    "risex": true
+    "risex": true,
+    "txflow": true,
+    "qfex": true,
+    "popdex": true
 }

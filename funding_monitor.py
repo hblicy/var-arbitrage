@@ -10,6 +10,7 @@ import time
 from curl_cffi.requests.exceptions import RequestException
 
 from funding_strategy import DEPTH_BUDGETS, HORIZONS, depth_scenarios, project_funding
+from config import get_taker_fee_bps
 from strategy_history import StrategyHistory
 
 logger = logging.getLogger(__name__)
@@ -57,8 +58,8 @@ class FundingMonitor:
         budgets = sorted(set((*DEPTH_BUDGETS, self.cfg.entry_check.notional_usd)))
         result = depth_scenarios(buy, sell, books[0]['book'], books[1]['book'], now=now,
                                  hours=hours, budgets=budgets,
-                                 buy_fee=self.cfg.exchanges[buy_key].taker_bps,
-                                 sell_fee=self.cfg.exchanges[sell_key].taker_bps,
+                                 buy_fee=get_taker_fee_bps(self.cfg.exchanges[buy_key], buy.symbol),
+                                 sell_fee=get_taker_fee_bps(self.cfg.exchanges[sell_key], sell.symbol),
                                  min_net_bps=self.cfg.strategy.min_net_bps)
         result.update(checked_at=now, expires_at=min(times)+self.cfg.entry_check.max_quote_age_ms/1000,
                       quote_age_ms=max(0, age_ms), hours=hours)
@@ -75,6 +76,8 @@ class FundingMonitor:
         buy, sell = data.get(buy_key, {}).get(symbol), data.get(sell_key, {}).get(symbol)
         if not all(self._fresh(market, time.time()) for market in (buy, sell)):
             return {'reason': 'STALE_DATA', 'tiers': [], 'capacity': None}
+        if buy.quote_currency != 'USD' or sell.quote_currency != 'USD':
+            return {'reason': 'NON_USD_QUOTE', 'tiers': [], 'capacity': None}
         pair = [collectors.get(key) for key in (buy_key, sell_key)]
         if any(not callable(getattr(collector, 'fetch_order_book', None)) for collector in pair):
             return {'reason': 'DEPTH_UNSUPPORTED', 'tiers': [], 'capacity': None}
@@ -112,8 +115,8 @@ class FundingMonitor:
             key = route_key(opp.symbol, buy_key, sell_key)
             projections = {str(hours): project_funding(buy, sell, now=now, hours=hours,
                            notional=self.cfg.entry_check.notional_usd,
-                           buy_fee=self.cfg.exchanges[buy_key].taker_bps,
-                           sell_fee=self.cfg.exchanges[sell_key].taker_bps) for hours in HORIZONS}
+                           buy_fee=get_taker_fee_bps(self.cfg.exchanges[buy_key], opp.symbol),
+                           sell_fee=get_taker_fee_bps(self.cfg.exchanges[sell_key], opp.symbol)) for hours in HORIZONS}
             summary = history.get(key, {'coverage': 0, 'valid_seconds': 0, 'window_hours': policy.history_hours})
             mean = summary.get('spread_mean_bps')
             row = {'key': key, 'symbol': opp.symbol, 'buy_exchange': buy_key, 'sell_exchange': sell_key,
@@ -129,7 +132,7 @@ class FundingMonitor:
         candidates = sorted((item for item in rows if
             item[1]['projections'][str(policy.holding_hours)]['reason'] is None
             and item[1]['projections'][str(policy.holding_hours)]['net_bps'] >= policy.min_net_bps
-            and (item[1]['funding_hourly_bps'] or 0) > 0
+            and item[1]['projections'][str(policy.holding_hours)]['funding_usd'] > 0
             and item[1]['history']['coverage'] >= policy.min_coverage),
             key=lambda item: item[1]['projections'][str(policy.holding_hours)]['net_bps'], reverse=True)
         requests = {}
@@ -171,7 +174,7 @@ class FundingMonitor:
                 reason = 'STALE_DATA'
             elif projection['reason']:
                 reason = projection['reason']
-            elif (row['funding_hourly_bps'] or 0) <= 0 or projection['net_bps'] < policy.min_net_bps:
+            elif projection['funding_usd'] <= 0 or projection['net_bps'] < policy.min_net_bps:
                 reason = 'LOW_NET_RETURN'
             elif row['history']['coverage'] < policy.min_coverage:
                 reason = 'HISTORY_WARMUP'

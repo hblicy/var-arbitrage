@@ -6,6 +6,7 @@ const format = (value, digits = 2) => Number.isFinite(value) ? value.toLocaleStr
 const signed = value => Number.isFinite(value) ? `${value > 0 ? '+' : ''}${format(value)}` : '—';
 const stateNames = { watch: '观察', pending: '持续观察中', triggered: '已达标 · 须复核', paused: '数据暂停', ended: '机会结束' };
 const timeText = seconds => Number.isFinite(seconds) ? new Date(seconds * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+const scheduleSource = source => source === 'exchange' ? '交易所提供' : source === 'exchange_market_hours' ? '交易所市场时段' : '按周期推算';
 
 function HistoryChart({ points, field, title, hours, through }) {
   const valid = points.filter(point => Number.isFinite(point[field]));
@@ -193,7 +194,7 @@ export default function FundingRadar({ enabledExchanges }) {
           {[['预计资金费', projection?.funding_usd], ['开仓价差收益', projection?.entry_spread_usd], ['平仓价差成本', projection?.exit_spread_cost_usd], ['四笔手续费', projection?.fees_usd], [`${hours}h 净收益`, projection?.net_usd]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{signed(value)} USD</strong></div>)}
         </div>
         <p className="fund-muted">预计结算：多腿 {projection?.buy_schedule?.count} 次 / 空腿 {projection?.sell_schedule?.count} 次。下一次：{timeText(projection?.buy_schedule?.next_at)} / {timeText(projection?.sell_schedule?.next_at)}。</p>
-        <p className="fund-muted">结算时点依据：多腿 {projection?.buy_schedule?.source === 'exchange' ? '交易所提供' : '按周期推算'}；空腿 {projection?.sell_schedule?.source === 'exchange' ? '交易所提供' : '按周期推算'}。实际费率、结算时间及退出价格可能变化。</p>
+        <p className="fund-muted">结算时点依据：多腿 {scheduleSource(projection?.buy_schedule?.source)}；空腿 {scheduleSource(projection?.sell_schedule?.source)}。按当前市场时段与费率估算，实际费率、时段及退出价格可能变化。</p>
       </>}
       <div className="fund-toolbar"><h3>计划金额与盘口容量</h3><button onClick={verify} disabled={currentCheck?.pending}>{currentCheck?.pending ? '复核中…' : `复核 ${hours}h 分档容量`}</button></div>
       {currentCheck?.error && <p role="alert">{currentCheck.error}</p>}

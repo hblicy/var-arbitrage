@@ -90,6 +90,8 @@ class ExchangeSettings:
     funding_endpoint: Optional[Endpoint] = None
     # 交易所吃单手续费（基点）
     taker_bps: float = 5.0
+    symbol_taker_bps: Dict[str, float] = field(default_factory=dict)
+    category_taker_bps: Dict[str, float] = field(default_factory=dict)
     # Variational 无公开 API 时使用的抓取模式（scrape / disable）
     scrape_mode: Optional[str] = None
     # 抓取模式下使用的 CSS 选择器集合
@@ -395,6 +397,35 @@ class Settings:
         taker_bps=_env_float("RISEX_TAKER_FEE_BPS", 3.0),
         min_volume_usd=_env_float("RISEX_MIN_VOLUME_USD", 0.0),
     ))
+    txflow: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
+        name="TxFlow",
+        base_url=os.getenv("TXFLOW_BASE_URL", "https://rpc.txflow.com"),
+        ws_url=os.getenv("TXFLOW_WS_URL", "wss://rpc.txflow.com/ws"),
+        timeout=_env_float("TXFLOW_HTTP_TIMEOUT", 10.0),
+        taker_bps=_env_float("TXFLOW_TAKER_FEE_BPS", 4.5),
+        min_volume_usd=_env_float("TXFLOW_MIN_VOLUME_USD", 0.0),
+        extra_headers={"x-api-version": "2026-08-16"},
+    ))
+    qfex: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
+        name="QFEX",
+        base_url=os.getenv("QFEX_BASE_URL", "https://api.qfex.com"),
+        ws_url=os.getenv("QFEX_WS_URL", "wss://mds.qfex.com"),
+        timeout=_env_float("QFEX_HTTP_TIMEOUT", 10.0),
+        taker_bps=_env_float("QFEX_TAKER_FEE_BPS", 10.0),
+        category_taker_bps={
+            "COMMODITY": _env_float("QFEX_COMMODITY_TAKER_FEE_BPS", 5.0),
+            "INDEX": _env_float("QFEX_INDEX_TAKER_FEE_BPS", 5.0),
+            "EQUITY": _env_float("QFEX_EQUITY_TAKER_FEE_BPS", 10.0),
+        },
+        min_volume_usd=_env_float("QFEX_MIN_VOLUME_USD", 0.0),
+    ))
+    popdex: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
+        name="PopDEX",
+        base_url=os.getenv("POPDEX_BASE_URL", "https://api.popdex.xyz"),
+        timeout=_env_float("POPDEX_HTTP_TIMEOUT", 10.0),
+        taker_bps=_env_float("POPDEX_TAKER_FEE_BPS", 3.2),
+        min_volume_usd=_env_float("POPDEX_MIN_VOLUME_USD", 0.0),
+    ))
 
     @property
     def exchanges(self) -> Dict[str, ExchangeSettings]:
@@ -408,6 +439,9 @@ class Settings:
             "arcus": self.arcus,
             "bulk": self.bulk,
             "risex": self.risex,
+            "txflow": self.txflow,
+            "qfex": self.qfex,
+            "popdex": self.popdex,
         }
 
     def save_runtime_config(self):
@@ -434,6 +468,12 @@ class Settings:
                         all_exchanges[k].enabled = enabled
         except Exception as e:
             print(f"Error loading runtime config: {e}")
+
+
+def get_taker_fee_bps(exchange, symbol: str) -> float:
+    if exchange is None:
+        return 5.0
+    return getattr(exchange, "symbol_taker_bps", {}).get(symbol, exchange.taker_bps)
 
 
 settings = Settings()

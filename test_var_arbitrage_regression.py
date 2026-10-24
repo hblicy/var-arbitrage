@@ -60,6 +60,7 @@ class MockConfig:
         def get(_name):
             m = MagicMock()
             m.taker_bps = 5.0
+            m.symbol_taker_bps = {}
             return m
 
 

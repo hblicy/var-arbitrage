@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import logging
+from config import get_taker_fee_bps
+from funding_strategy import funding_window_active, settlement_schedule
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, TYPE_CHECKING
 
@@ -504,6 +506,16 @@ def accumulate_funding(
                 if last_settle_local and last_settle_local >= settle_point:
                     continue
 
+                if getattr(market, 'funding_hours', None) is not None:
+                    try:
+                        active = funding_window_active(market, settle_point.timestamp())
+                    except ValueError as exc:
+                        logger.warning('%s [%s/%s] 跳过无法确认的资金费窗口 %s: %s',
+                                       symbol, leg, ex_name, settle_point.isoformat(), exc)
+                        continue
+                    if not active:
+                        continue
+
                 is_catchup = (settle_point != prev_settle_local) or not in_settle_window
 
                 # ── 取费率 ──
@@ -615,6 +627,18 @@ def accumulate_funding(
     return settlements_recorded
 
 
+def _scheduled_exit_funding(long_data, short_data, now):
+    if long_data.funding_rate is None or short_data.funding_rate is None:
+        return None
+    try:
+        long_count = settlement_schedule(long_data, now.timestamp(), 8)['count']
+        short_count = settlement_schedule(short_data, now.timestamp(), 8)['count']
+    except ValueError as exc:
+        logger.warning('暂停 %s 资金费反转判断，结算时段无法确认: %s', long_data.symbol, exc)
+        return None
+    return long_data.funding_rate * long_count, short_data.funding_rate * short_count
+
+
 def check_exit_signals(
     exchanges_data: Dict[str, Dict],
     cfg: Optional["Settings"] = None,
@@ -674,6 +698,12 @@ def check_exit_signals(
         base_interval = 8
         long_rate_scaled = long_rate * (8 / long_interval)
         short_rate_scaled = short_rate * (8 / short_interval)
+        if getattr(long_data, 'funding_hours', None) is not None or getattr(short_data, 'funding_hours', None) is not None:
+            scheduled = _scheduled_exit_funding(long_data, short_data, now)
+            if scheduled is None:
+                _unfavorable_since.pop(p_id, None)
+                continue
+            long_rate_scaled, short_rate_scaled = scheduled
         net_funding_scaled = short_rate_scaled - long_rate_scaled
 
         # Get threshold from config
@@ -703,8 +733,8 @@ def check_exit_signals(
 
                 pnl_info = None
                 if cfg:
-                    long_taker = getattr(cfg.exchanges.get(long_ex), 'taker_bps', 5.0) if hasattr(cfg, 'exchanges') else 5.0
-                    short_taker = getattr(cfg.exchanges.get(short_ex), 'taker_bps', 5.0) if hasattr(cfg, 'exchanges') else 5.0
+                    long_taker = get_taker_fee_bps(cfg.exchanges.get(long_ex), pos['symbol']) if hasattr(cfg, 'exchanges') else 5.0
+                    short_taker = get_taker_fee_bps(cfg.exchanges.get(short_ex), pos['symbol']) if hasattr(cfg, 'exchanges') else 5.0
 
                     pos_copy = pos.copy()
                     pos_copy["current_funding_long"] = long_rate_scaled
@@ -836,6 +866,12 @@ def check_exit_signals_for_owner(
         base_interval = 8
         long_rate_scaled = long_rate * (8 / long_interval)
         short_rate_scaled = short_rate * (8 / short_interval)
+        if getattr(long_data, 'funding_hours', None) is not None or getattr(short_data, 'funding_hours', None) is not None:
+            scheduled = _scheduled_exit_funding(long_data, short_data, now)
+            if scheduled is None:
+                _unfavorable_since.pop(p_id, None)
+                continue
+            long_rate_scaled, short_rate_scaled = scheduled
         net_funding_scaled = short_rate_scaled - long_rate_scaled
 
         exit_threshold_bps = -33.3

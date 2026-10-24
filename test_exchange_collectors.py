@@ -19,7 +19,7 @@ from notifier import WeChatNotifier
 
 
 NOW = 1789871500.0
-EXCHANGES = {"binance", "variational", "hyperliquid", "aster", "lighter", "arcus", "bulk", "risex"}
+EXCHANGES = {"binance", "variational", "hyperliquid", "aster", "lighter", "arcus", "bulk", "risex", "txflow", "qfex", "popdex"}
 ARCUS = {
     "marketDisplayName": "BTC-USD", "baseAsset": "BTC", "quoteAsset": "USD",
     "marketId": 1, "status": "ONLINE", "type": "PERPETUAL",
@@ -113,7 +113,7 @@ class TestExchangeRegistry(unittest.TestCase):
         self.assertEqual(markets["zero"].timestamp, 0)
         self.assertEqual(markets["missing"].timestamp, NOW)
 
-    def test_only_requested_eight_exchanges_remain(self):
+    def test_only_requested_eleven_exchanges_remain(self):
         self.assertEqual(set(Settings().exchanges), EXCHANGES)
 
     def test_legacy_config_cannot_restore_removed_exchanges(self):

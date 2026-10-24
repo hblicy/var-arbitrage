@@ -280,6 +280,9 @@ def _format_text(items: Iterable[ArbitrageOpportunity]) -> str:
             )
             lines.append('假设费率保持不变、退出盘口不变；非保证收益，开仓前须重新复核。')
             continue
+        if details.get('funding_projection_reason'):
+            lines.append(f'\n{opp.symbol} · 仅观察：资金费时段无法可靠估算，请查看策略详情。')
+            continue
         intervals = details.get("native_intervals", {})
         buy_interval = intervals.get("buy", "?")
         sell_interval = intervals.get("sell", "?")

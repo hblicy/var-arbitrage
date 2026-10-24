@@ -24,4 +24,6 @@ export const reasonText = reason => ({
   EMPTY_BOOK: '盘口为空', INVALID_BOOK: '盘口数据异常', INVALID_MARKET: '行情数据异常',
   INVALID_QUOTE_TIME: '报价时间异常', FUNDING_SCHEDULE_INVALID: '结算时间异常',
   SCAN_INTERRUPTED: '本轮复核中断，重新计时',
+  FUNDING_SCHEDULE_UNCERTAIN: '跨交易时段的资金费无法可靠估算',
+  NON_USD_QUOTE: '原币计价：暂不提供美元金额复核',
 }[reason] || reason || '满足当前筛选条件');

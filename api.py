@@ -15,7 +15,7 @@ import re
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from config import settings
+from config import get_taker_fee_bps, settings
 from collectors.variational import VariationalCollector
 from collectors.binance import BinanceCollector
 from analyzer import analyse_markets
@@ -215,6 +215,7 @@ class MarketInfo(BaseModel):
     funding_rate: Optional[float]
     volume_24h: Optional[float]
     native_interval: int
+    quote_currency: str = 'USD'
 
 class ArbitrageOpportunity(BaseModel):
     symbol: str
@@ -282,14 +283,16 @@ async def evaluate_manual_entry(symbol: str, long_exchange: str, short_exchange:
         buy_book=buy_book,
         sell_book=sell_book,
         notional_usd=settings.entry_check.notional_usd,
-        buy_fee_bps=settings.exchanges[long_key].taker_bps,
-        sell_fee_bps=settings.exchanges[short_key].taker_bps,
+        buy_fee_bps=get_taker_fee_bps(settings.exchanges[long_key], symbol),
+        sell_fee_bps=get_taker_fee_bps(settings.exchanges[short_key], symbol),
         safety_buffer_bps=settings.entry_check.safety_buffer_bps,
         buy_quoted_at=buy_quoted_at,
         sell_quoted_at=sell_quoted_at,
         checked_at=time.time(),
         max_quote_age_ms=settings.entry_check.max_quote_age_ms,
         max_leg_skew_ms=settings.entry_check.max_leg_skew_ms,
+        buy_quote_currency=buy_book.get('quote_currency', 'USD'),
+        sell_quote_currency=sell_book.get('quote_currency', 'USD'),
     )
     result.update({
         "symbol": symbol,
@@ -369,6 +372,7 @@ async def perform_analysis():
                     "funding_rate": m.funding_rate,
                     "volume_24h": m.volume_24h,
                     "native_interval": m.native_interval_hours,
+                    "quote_currency": m.quote_currency,
                 }
             else:
                 sym_data[key] = None
@@ -380,11 +384,10 @@ async def perform_analysis():
     for opp in opportunities:
         total_net_bps = opp.details.get("total_net_bps", 0)
         base_interval = opp.details.get("base_interval", 8)
-        funding_bps = opp.details.get("funding_diff_scaled_bps", 0)
         net_spread_bps = opp.net_spread_bps
         
-        funding_annual = funding_bps * (24 / base_interval) * 3.65 if base_interval > 0 else 0
-        total_apr = funding_annual + (net_spread_bps / 100.0)
+        funding_daily = opp.details['funding_diff_24h_bps']
+        total_apr = funding_daily * 3.65 + net_spread_bps / 100 if funding_daily is not None else None
         
         details = {**opp.details}
         opp_display.append({
@@ -398,7 +401,7 @@ async def perform_analysis():
         })
     
     # Sort by APR descending
-    opp_display.sort(key=lambda x: x["total_apr"], reverse=True)
+    opp_display.sort(key=lambda x: x["total_apr"] if x["total_apr"] is not None else float('-inf'), reverse=True)
         
     # Update latest_data
     latest_data["markets"] = markets_display
@@ -757,6 +760,14 @@ async def create_position(pos: PositionCreate, current_user: Dict = Depends(get_
     # Auto-fill entry funding rates: 单边独立判断，缺哪边补哪边
     exchanges_data = latest_data.get("raw_exchanges_data", {})
 
+    for exchange in (pos.long_exchange, pos.short_exchange):
+        market = exchanges_data.get(exchange.lower(), {}).get(pos.symbol.upper())
+        # QFEX canonical USD symbols always end in USDT, including before the first snapshot.
+        if (market is not None and market.quote_currency != 'USD') or (
+            market is None and exchange.lower() == 'qfex' and not pos.symbol.upper().endswith('USDT')
+        ):
+            raise HTTPException(status_code=400, detail='NON_USD_POSITION_UNSUPPORTED')
+
     entry_funding_long = pos.entry_funding_long
     entry_funding_short = pos.entry_funding_short
     
@@ -834,8 +845,8 @@ async def get_positions_with_pnl(
         # Get exchange-specific taker fees
         long_cfg = settings.exchanges.get(long_ex)
         short_cfg = settings.exchanges.get(short_ex)
-        long_taker = getattr(long_cfg, 'taker_bps', 5.0) if long_cfg else 5.0
-        short_taker = getattr(short_cfg, 'taker_bps', 5.0) if short_cfg else 5.0
+        long_taker = get_taker_fee_bps(long_cfg, symbol)
+        short_taker = get_taker_fee_bps(short_cfg, symbol)
 
         # Inject current funding rates from live market data
         pos_copy = pos.copy()
