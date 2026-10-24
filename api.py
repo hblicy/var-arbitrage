@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Literal
 from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 import sys
@@ -199,6 +200,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Cross-Exchange Arbitrage Monitor", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # Enable CORS for frontend development
 app.add_middleware(
