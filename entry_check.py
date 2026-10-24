@@ -59,7 +59,11 @@ def evaluate_entry_quote(
     checked_at: float,
     max_quote_age_ms: int,
     max_leg_skew_ms: int,
+    buy_quote_currency: str = 'USD',
+    sell_quote_currency: str = 'USD',
 ) -> dict:
+    if buy_quote_currency != 'USD' or sell_quote_currency != 'USD':
+        return {"status": "unavailable", "reason": "NON_USD_QUOTE"}
     if notional_usd <= 0:
         raise ValueError("notional_usd must be positive")
 

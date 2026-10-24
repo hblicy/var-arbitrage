@@ -10,7 +10,7 @@ import {
 const STORAGE_KEY = 'arbitrage_exchange_prefs';
 const MIN_EXCHANGES_REQUIRED = 2;
 const POLL_INTERVAL_MS = 10000;
-const DEFAULT_EXCHANGES = ['binance', 'variational', 'hyperliquid', 'aster', 'lighter', 'arcus', 'bulk', 'risex'];
+const DEFAULT_EXCHANGES = ['binance', 'variational', 'hyperliquid', 'aster', 'lighter', 'arcus', 'bulk', 'risex', 'txflow', 'qfex', 'popdex'];
 const EMPTY_DASHBOARD_DATA = {
   markets: {},
   opportunities: [],
@@ -49,6 +49,9 @@ const EXCHANGE_LABELS = {
   arcus: 'Arcus',
   bulk: 'Bulk',
   risex: 'RISEx',
+  txflow: 'TxFlow',
+  qfex: 'QFEX',
+  popdex: 'PopDEX',
 };
 
 const formatExchangeName = (name) => EXCHANGE_LABELS[name] || name.charAt(0).toUpperCase() + name.slice(1);
@@ -67,6 +70,7 @@ const getBaseInterval = (opportunity) => (
 );
 
 const calcFundingDailyBps = (opportunity) => {
+  if (opportunity.details.funding_projection_reason) return NaN;
   const baseInterval = getBaseInterval(opportunity);
   return num(
     opportunity.details.funding_daily_bps,
@@ -76,25 +80,32 @@ const calcFundingDailyBps = (opportunity) => {
 };
 
 const calcProjected24hPercent = (opportunity) => (
+  opportunity.details.funding_projection_reason ? NaN :
   num(
     opportunity.details.projected_24h_bps,
     num(opportunity.details.net_spread_bps) + calcFundingDailyBps(opportunity),
   ) / 100
 );
 
+const calcFundingHourlyBps = (opportunity) => (
+  opportunity.details.funding_hourly_bps === null ? NaN :
+    num(opportunity.details.funding_hourly_bps, calcFundingDailyBps(opportunity) / 24)
+);
+
 const getOpportunityApr = (opportunity) => (
+  opportunity.details.funding_projection_reason ? -Infinity :
   opportunity.total_apr ?? (
     calcFundingDailyBps(opportunity) * 3.65 +
     opportunity.details.net_spread_bps / 100.0
   )
 );
 
-const formatSignedBps = (value) => `${num(value) >= 0 ? '+' : ''}${num(value).toFixed(0)}`;
-const formatSignedPercent = (value, digits = 2) => `${num(value) >= 0 ? '+' : ''}${num(value).toFixed(digits)}%`;
+const formatSignedBps = (value) => Number.isFinite(Number(value)) ? `${num(value) >= 0 ? '+' : ''}${num(value).toFixed(0)}` : '—';
+const formatSignedPercent = (value, digits = 2) => Number.isFinite(Number(value)) ? `${num(value) >= 0 ? '+' : ''}${num(value).toFixed(digits)}%` : '—';
 
 const formatCoverTime = (coverHours, spreadBps) => {
   if (num(spreadBps) >= 0) return '无需覆盖';
-  if (!Number.isFinite(Number(coverHours))) return '无法估算';
+  if (coverHours == null || !Number.isFinite(Number(coverHours))) return '无法估算';
   const hours = Number(coverHours);
   if (hours < 1) return `${Math.round(hours * 60)}m`;
   return `${hours.toFixed(1)}h`;
@@ -123,6 +134,7 @@ const entryCheckMessage = (entryCheck) => {
     STALE_QUOTE: '报价已过期。',
     LEG_SKEW: '两边报价时间差过大。',
     QUOTE_FETCH_FAILED: '实时盘口获取失败。',
+    NON_USD_QUOTE: '原币计价合约暂不提供美元金额复核。',
   }[entryCheck.reason] || '暂不可人工开仓。';
   return `不可开：${reason}`;
 };
@@ -149,12 +161,12 @@ const ArbitrageCell = React.memo(function ArbitrageCell({ opportunity, entryChec
   const projected24hPercent = calcProjected24hPercent(opportunity);
   const priceBps = num(opportunity.details.net_spread_bps);
   const fundingDailyBps = calcFundingDailyBps(opportunity);
-  const fundingHourlyBps = num(opportunity.details.funding_hourly_bps, fundingDailyBps / 24);
+  const fundingHourlyBps = calcFundingHourlyBps(opportunity);
   const coverHours = opportunity.details.cover_hours;
   const setupType = opportunity.details.opportunity_type || 'watch';
   const buyVolume = opportunity.details.volumes.buy;
   const sellVolume = opportunity.details.volumes.sell;
-  const formatVolume = (volume) => !Number.isFinite(Number(volume))
+  const formatVolume = (volume) => volume == null || !Number.isFinite(Number(volume))
     ? '-'
     : Number(volume) > 1000000
       ? `${(Number(volume) / 1000000).toFixed(1)}M`
@@ -271,6 +283,7 @@ const ObservationPool = React.memo(function ObservationPool({ opportunities }) {
 
 const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, symbolMaxIntervals, entryChecks, manualReviewKeys, onVerifyEntry }) {
   const { sym, delta, bestSymbolOpp, baseInterval } = row;
+  const quoteCurrency = Object.values(marketSet).find(market => market?.quote_currency)?.quote_currency || 'USD';
   const manualReview = bestSymbolOpp && manualReviewKeys.has(entryCheckKey(bestSymbolOpp));
 
   return (
@@ -280,7 +293,7 @@ const MarketRow = React.memo(function MarketRow({ row, marketSet, exchanges, sym
           <div className="coin-icon">{sym.substring(0, 1)}</div>
           <div>
             <span className="sym-name">{sym.replace('USDT', '')}</span>
-            <span className="sym-pair">PERP</span>
+            <span className="sym-pair">PERP{quoteCurrency !== 'USD' ? ` · ${quoteCurrency}` : ''}</span>
           </div>
         </div>
       </td>

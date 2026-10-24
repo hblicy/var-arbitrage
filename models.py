@@ -13,11 +13,13 @@ class MarketDatum:
     volume_24h: Optional[float] = None
     timestamp: Optional[float] = None
     exchange: Optional[str] = None
-    native_interval_hours: int = 8  # Default to 8h
+    native_interval_hours: float = 8  # Default to 8h
     best_bid: Optional[float] = None  # Best bid price for slippage calculation
     best_ask: Optional[float] = None  # Best ask price for slippage calculation
     next_funding_time: Optional[float] = None  # Next settlement timestamp (UTC ms)
     next_funding_time_source: str = "exchange"
+    quote_currency: str = "USD"
+    funding_hours: Optional[dict] = None
 
 
 @dataclass

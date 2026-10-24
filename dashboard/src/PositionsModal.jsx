@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 const AUTH_KEY = 'pos_auth_v2'; // upgraded key
 const REFRESH_MS = 30000;
-const POSITION_EXCHANGES = ['variational', 'binance', 'hyperliquid', 'aster', 'lighter', 'arcus', 'bulk', 'risex'];
+const POSITION_EXCHANGES = ['variational', 'binance', 'hyperliquid', 'aster', 'lighter', 'arcus', 'bulk', 'risex', 'txflow', 'qfex', 'popdex'];
 
 const PositionsModal = ({ isOpen, onClose }) => {
     // ── Auth state ─────────────────────────────────────────────
@@ -179,6 +179,10 @@ const PositionsModal = ({ isOpen, onClose }) => {
         e.preventDefault();
         if (!newSymbol) return;
         let sym = newSymbol.toUpperCase().trim();
+        if ((longEx === 'qfex' || shortEx === 'qfex') && /(CNY|KRW|JPY|SEK)$/.test(sym)) {
+            setError('该合约以原币计价，当前美元持仓账本暂不支持。');
+            return;
+        }
         if (!sym.endsWith('USDT')) sym += 'USDT';
         setLoading(true);
         try {
@@ -196,7 +200,8 @@ const PositionsModal = ({ isOpen, onClose }) => {
                 setNewSymbol(''); setEntryQty(''); setEntryPriceLong(''); setEntryPriceShort('');
                 await loadPositions();
                 await loadReversals();
-            } else { const d = await res.json(); setError(d.detail || 'Failed'); }
+            } else { const d = await res.json(); setError(d.detail === 'NON_USD_POSITION_UNSUPPORTED'
+                ? '该合约以原币计价，当前美元持仓账本暂不支持。' : (d.detail || 'Failed')); }
         } catch { setError('Network error'); }
         finally { setLoading(false); }
     };

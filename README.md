@@ -12,6 +12,9 @@
 - **Arcus** (`arcus`) - 公开 REST，1h 资金费率、L2 盘口复核
 - **Bulk** (`bulk`) - 公开 REST，整点 1h 资金费率、L2 盘口复核
 - **RISEx** (`risex`) - 公开 REST，按市场返回的资金费周期、L2 盘口复核
+- **TxFlow** (`txflow`) - 公开 REST + 批量资金费订阅，永续与 RWA、L2 盘口复核
+- **QFEX** (`qfex`) - 公开 REST + 全市场报价快照，保留 RWA 原币计价及资金费时段
+- **PopDEX** (`popdex`) - 完整分页行情与资金费快照，永续与 RWA、L2 盘口复核
 
 *(在 v1.6 中，Paradex 被移除并替换为 Hyperliquid，以获得更大的日均交易量和更好的价差捕捉能力。)*
 
@@ -34,6 +37,27 @@
 - 原始币种保留映射到现有 `BTCUSDT` 等统一键；成交额使用 USD/USDC 名义金额，资金费率保留正负号与真实零值。
 - Arcus / Bulk 盘口按源时间戳检查新鲜度；RISEx REST 盘口不返回源时间戳，现有复核按请求完成时间检查时效。空盘口不会用标记价格伪造，接口失败会进入现有交易所错误状态。
 - 更新部署后重启后端并重新构建前端。对照 `env.example` 补充三家配置即可；原 `NADO_VARIATIONAL_WECHAT_WEBHOOK` 名称继续保留，避免现有推送配置失效。
+
+### TxFlow / QFEX / PopDEX 接入说明
+
+三家均使用公开行情，无需 API Key，接入现有价差、资金费策略、人工盘口复核、持仓选所和通知流程。
+
+| 交易所 | 数据与费用口径 |
+| --- | --- |
+| TxFlow | `perpMeta` 解析真实合约 ID；`webData2` 提供名义成交额，WS `allAssetCtxs` 提供资金费和结算时间。节点 `funding` 是百分数，除以 100 后进入内部计算。标准 taker 4.5 bps。 |
+| QFEX | `/refdata`、`/md/contracts` 与 WS `market_stats`；使用 `next_funding_rate` 的小数比例、分钟制周期和秒制下一结算时间。普通账户商品/指数 5 bps、股票 10 bps，按实际账户等级覆盖。 |
+| PopDEX | `/config/symbols`、分页 ticker、分页 `/market/funding-rate`；使用 `turnover24h` 名义成交额、当前小数费率、小时周期及 `nextUpdate` 毫秒结算时间。标准 taker 3.2 bps。 |
+
+- TxFlow 在主网批量发送 BBO 订阅会遗漏部分报价，因此只订阅一次全量资金费；通过现有成交额门槛的市场使用有限并发 REST 盘口补齐买卖价。采集与人工深度复核共享每秒 40 次请求预算，低于官方 50 次上限。低成交额市场仍采集行情和资金费。
+- QFEX 的资金费仅在接口返回的市场时段生效。按 IANA 时区处理夏令时和跨日窗口，休市窗口不计息；部分计息窗口、由休市跨入下一开市且未来费率未知、或缺失时段时，暂停收益预测和自动信号。使用交易所当前提供的时段配置，未来临时休市仍可能变化。
+- 原始机会页的 24h 估算也应用资金费时段；受时段限制的路线不显示线性资金费覆盖时间。资金费策略页提供按结算窗口计算的 1/4/8/24h 情景，候选与反转提醒使用对应窗口的有效结算次数；持仓补记跳过休市及无法确认的窗口。
+- 全部活跃永续均采集，过滤停牌、下架及非永续市场。仅核实的 QFEX 商品别名 `GOLD → XAU`、`SILVER → XAG` 归一化，不合并含义不同的指数、股票或报价币种。
+- USD/USDC/USDT 沿用现有美元口径；CNY/KRW/JPY/SEK 合约保留原币键和标签，只与相同计价币比较，不虚报美元成交额、收益或深度容量。当前持仓账本以美元计价，QFEX 原币合约在缺失行情时也无法进入该账本。
+- 空盘口、零数量档位、缺失资金费及真实零费率分别处理。盘口复核保留现有 2 秒源时间门槛，过期报价会被拒绝，不以接收时间刷新源报价。
+
+配置见 `env.example`。升级后重启后端并重新构建前端，无数据库迁移或新增依赖。
+
+依据：[TxFlow API](https://docs.txflow.com/api)、[TxFlow 费用](https://docs.txflow.com/trade/fees)、[QFEX 资金费](https://docs.qfex.com/qfex/funding)、[QFEX 费用](https://docs.qfex.com/qfex/fees)、[QFEX 官方 CLI 费率示例](https://github.com/QFEX-org/cli/blob/main/STRATEGIES.md)、[PopDEX 资金费](https://popdex.xyz/docs/product-docs/trading/funding)、[PopDEX 公开费率](https://api.popdex.xyz/api/v1/public/fee-rate?category=Futures&limit=100)。核实日期：2026-10-24。
 
 ## 🔹 核心功能
 

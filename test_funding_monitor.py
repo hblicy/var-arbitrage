@@ -51,6 +51,22 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(second[0].details['funding_strategy']['status'], 'triggered')
             self.assertGreater(second[0].details['funding_strategy']['depth']['capacity']['notional_usd'], 1000)
 
+    async def test_rwa_positive_settled_funding_can_qualify_with_negative_hourly_spread(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 10, 23, 22, tzinfo=timezone.utc).timestamp()
+        hours = {'tz': 'America/New_York', 'friday': [
+            {'open': '00:00:00', 'close': '19:59:59', 'session': 'open'}]}
+        buy, sell = self.data['arcus']['BTCUSDT'], self.data['bulk']['BTCUSDT']
+        buy.funding_hours, buy.funding_rate, sell.funding_rate = hours, .002, .0012
+        buy.next_funding_time = sell.next_funding_time = (now+3600)*1000
+        with patch.object(self.store, 'summaries', return_value=self.history):
+            opps = await self.cycle(now)
+            row = opps[0].details['funding_strategy']
+            self.assertLess(row['funding_hourly_bps'], 0)
+            self.assertGreater(row['projections']['8']['funding_usd'], 0)
+            self.assertEqual(row['status'], 'pending')
+            self.assertEqual((await self.cycle(now+10))[0].details['funding_strategy']['status'], 'triggered')
+
     async def test_warmup_and_thin_depth_never_trigger(self):
         await self.cycle()
         self.assertEqual(self.monitor.rows[0]['reason'], 'HISTORY_WARMUP')

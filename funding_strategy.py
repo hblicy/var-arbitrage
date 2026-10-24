@@ -2,11 +2,61 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, time as clock_time, timedelta
+from zoneinfo import ZoneInfo
 
 from entry_check import _levels_vwap
 
 HORIZONS = (1, 4, 8, 24)
 DEPTH_BUDGETS = (1000, 5000, 10000)
+
+
+class FundingScheduleUncertain(ValueError):
+    pass
+
+
+def _funding_sessions(schedule, start, end):
+    if not isinstance(schedule, dict) or not schedule.get('tz'):
+        raise ValueError('Missing funding market hours')
+    zone = ZoneInfo(schedule['tz'])
+    day = datetime.fromtimestamp(start, zone).date() - timedelta(days=1)
+    last_day = datetime.fromtimestamp(end, zone).date()
+    sessions = []
+    while day <= last_day:
+        weekday = ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday')[day.weekday()]
+        for row in schedule.get(weekday, []):
+            if row['session'] != 'open':
+                continue
+            opening = datetime.combine(day, clock_time.fromisoformat(row['open']), zone)
+            closing = datetime.combine(day, clock_time.fromisoformat(row['close']), zone)
+            if closing < opening:
+                closing += timedelta(days=1)
+            sessions.append((opening.timestamp(), closing.timestamp() + 1))
+        day += timedelta(days=1)
+    merged = []
+    for opening, closing in sorted(sessions):
+        if merged and opening <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(closing, merged[-1][1]))
+        else:
+            merged.append((opening, closing))
+    return merged
+
+
+def _full_funding_window(sessions, payment, period):
+    active_seconds = sum(max(0, min(payment, closing) - max(payment-period, opening))
+                         for opening, closing in sessions)
+    if active_seconds and not math.isclose(active_seconds, period, abs_tol=.001):
+        raise FundingScheduleUncertain('Funding window crosses a session boundary')
+    return active_seconds > 0
+
+
+def funding_window_active(market, payment):
+    period = market.native_interval_hours * 3600
+    if not math.isfinite(period) or period <= 0:
+        raise ValueError('Invalid funding interval')
+    if market.funding_hours is None:
+        return True
+    return _full_funding_window(_funding_sessions(market.funding_hours, payment-period, payment), payment, period)
 
 
 def settlement_schedule(market, now: float, hours: int) -> dict:
@@ -27,6 +77,21 @@ def settlement_schedule(market, now: float, hours: int) -> dict:
             source = 'rolled_forward'
     end = now + hours * 3600
     count = max(0, math.floor((end - first) / period) + 1)
+    if market.funding_hours is not None:
+        sessions = _funding_sessions(market.funding_hours, first - period, end)
+        current_session = next(((opening, closing) for opening, closing in sessions
+                                if opening <= now < closing), None)
+        active_count = 0
+        for index in range(count):
+            payment = first + index * period
+            if _full_funding_window(sessions, payment, period):
+                if current_session is None or not (
+                    current_session[0] <= payment-period and payment <= current_session[1]
+                ):
+                    raise FundingScheduleUncertain('Funding rate after reopening is unknown')
+                active_count += 1
+        count = active_count
+        source += '_market_hours'
     return {'count': count, 'next_at': first, 'source': source}
 
 
@@ -37,6 +102,10 @@ def project_funding(buy, sell, *, now, hours, notional, buy_fee, sell_fee, price
         raise ValueError('Invalid fee')
     base = {'hours': hours, 'notional_usd': notional, 'exit_assumption': 'unchanged_books',
             'funding_assumption': 'constant_rates', 'net_bps': None, 'net_usd': None}
+    if buy.quote_currency != 'USD' or sell.quote_currency != 'USD':
+        return {**base, 'reason': 'NON_USD_QUOTE'}
+    if buy.funding_hours is not None or sell.funding_hours is not None:
+        base['funding_assumption'] = 'constant_rates_market_hours'
     if buy.funding_rate is None or sell.funding_rate is None:
         return {**base, 'reason': 'FUNDING_UNAVAILABLE'}
     values = (buy.price, sell.price, buy.funding_rate, sell.funding_rate)
@@ -51,6 +120,8 @@ def project_funding(buy, sell, *, now, hours, notional, buy_fee, sell_fee, price
     try:
         buy_schedule = settlement_schedule(buy, now, hours)
         sell_schedule = settlement_schedule(sell, now, hours)
+    except FundingScheduleUncertain:
+        return {**base, 'reason': 'FUNDING_SCHEDULE_UNCERTAIN'}
     except ValueError:
         return {**base, 'reason': 'FUNDING_SCHEDULE_INVALID'}
     quantity = quantity if quantity is not None else notional / max(entry_buy, entry_sell)

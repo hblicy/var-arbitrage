@@ -8,6 +8,9 @@ from collectors.aster import AsterCollector
 from collectors.arcus import ArcusCollector
 from collectors.bulk import BulkCollector
 from collectors.risex import RisexCollector
+from collectors.txflow import TxflowCollector
+from collectors.qfex import QfexCollector
+from collectors.popdex import PopdexCollector
 from config import ExchangeSettings
 
 COLLECTOR_MAP: Dict[str, Type[MarketCollector]] = {
@@ -19,6 +22,9 @@ COLLECTOR_MAP: Dict[str, Type[MarketCollector]] = {
     "arcus": ArcusCollector,
     "bulk": BulkCollector,
     "risex": RisexCollector,
+    "txflow": TxflowCollector,
+    "qfex": QfexCollector,
+    "popdex": PopdexCollector,
 }
 
 def create_collector(key: str, settings: ExchangeSettings) -> MarketCollector:
