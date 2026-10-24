@@ -190,6 +190,7 @@ class RwaCalculations(unittest.TestCase):
 
 class Response:
     def __init__(self, payload):
+        self.status_code = 200
         self.payload = payload
 
     def raise_for_status(self):

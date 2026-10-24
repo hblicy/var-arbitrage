@@ -2,9 +2,11 @@
 import asyncio
 import json
 import logging
+import math
 import time
 
 import websocket
+from curl_cffi.requests.exceptions import RequestException
 
 from collectors.base import MarketCollector
 from collectors.decorators import with_retry
@@ -16,6 +18,13 @@ from config import settings as app_settings
 logger = logging.getLogger(__name__)
 
 
+class TxflowRateLimited(ValueError):
+    """A quota rejection must not trigger an immediate full-scan retry."""
+    def __init__(self, kind, retry_after):
+        self.retry_after = retry_after
+        super().__init__(f'TxFlow /info {kind}: rate limited (HTTP 429), retry after {retry_after:.3f}s')
+
+
 class TxflowCollector(MarketCollector):
     def __init__(self, settings):
         super().__init__(settings)
@@ -25,18 +34,38 @@ class TxflowCollector(MarketCollector):
         self._metadata_at = 0
         self._request_lock = asyncio.Lock()
         self._next_request_at = 0
+        self._cooldown_until = 0
 
     async def aclose(self):
         await session_pool.close_session('txflow')
 
     async def _info(self, kind, **fields):
-        # Share the 40/s budget across scans and manual depth checks (official limit: 50/s).
+        # Share a conservative 20/s budget and server cooldown across every REST caller.
         async with self._request_lock:
+            remaining = self._cooldown_until - time.monotonic()
+            if remaining > 0:
+                raise TxflowRateLimited(kind, remaining)
             delay = self._next_request_at - time.monotonic()
             if delay > 0:
                 await asyncio.sleep(delay)
-            self._next_request_at = time.monotonic() + .025
+            # Another in-flight response can impose a cooldown while this caller sleeps.
+            remaining = self._cooldown_until - time.monotonic()
+            if remaining > 0:
+                raise TxflowRateLimited(kind, remaining)
+            self._next_request_at = time.monotonic() + .05
         response = await self._client.post('/info', json={'type': kind, **fields})
+        if response.status_code == 429:
+            try:
+                retry_after = float(response.headers.get('Retry-After'))
+            except (TypeError, ValueError):
+                retry_after = 1.0
+            if not math.isfinite(retry_after) or retry_after < 1:
+                retry_after = 1.0
+            self._cooldown_until = max(self._cooldown_until, time.monotonic() + retry_after)
+            remaining = self._cooldown_until - time.monotonic()
+            logger.warning('TxFlow HTTP 429: endpoint=/info type=%s coin=%s cooldown=%.3fs',
+                           kind, fields.get('coin', '-'), remaining)
+            raise TxflowRateLimited(kind, remaining)
         response.raise_for_status()
         payload = response.json()
         if payload['success'] is not True or payload['code'] != 0:
@@ -82,7 +111,7 @@ class TxflowCollector(MarketCollector):
         finally:
             socket.close()
 
-    @with_retry(max_retries=3)
+    @with_retry(max_retries=3, exceptions=(RequestException, TimeoutError, ConnectionError, websocket.WebSocketException))
     async def fetch_markets(self, symbols):
         await self._load_markets()
         requested = set(symbols)
@@ -118,7 +147,9 @@ class TxflowCollector(MarketCollector):
             # TxFlow node funding, like marketTicker.fundingRate, is a percentage.
             markets[symbol] = MarketDatum(symbol, price, funding / 100 if funding is not None else None,
                 volume, timestamp, self.settings.name, interval, bid, ask, next_time, quote_currency=quote)
+        rate_limited = 0
         async def quote_market(item):
+            nonlocal rate_limited
             if not requested and item.volume_24h is not None and item.volume_24h < app_settings.thresholds.min_volume_usd:
                 return
             try:
@@ -126,10 +157,16 @@ class TxflowCollector(MarketCollector):
             except StalePublicData as exc:
                 logger.warning('TxFlow %s BBO unavailable: %s', item.symbol, exc)
                 return
+            except TxflowRateLimited:
+                rate_limited += 1
+                return
             item.best_bid = book['bids'][0][0] if book['bids'] else None
             item.best_ask = book['asks'][0][0] if book['asks'] else None
             item.timestamp = min(item.timestamp, book['timestamp'])
         await self._gather_with_semaphore([quote_market(item) for item in markets.values()])
+        if rate_limited:
+            logger.warning('TxFlow BBO rate limited for %d markets; keeping funding without executable quotes; cooldown=%.3fs',
+                           rate_limited, max(0, self._cooldown_until-time.monotonic()))
         logger.info('Fetched %d markets from TxFlow', len(markets))
         return markets
 
