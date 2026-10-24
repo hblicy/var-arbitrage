@@ -10,7 +10,7 @@ import {
 const STORAGE_KEY = 'arbitrage_exchange_prefs';
 const MIN_EXCHANGES_REQUIRED = 2;
 const POLL_INTERVAL_MS = 10000;
-const DEFAULT_EXCHANGES = ['binance', 'variational', 'hyperliquid', 'aster', 'lighter', 'arcus', 'bulk', 'risex', 'txflow', 'qfex', 'popdex'];
+const DEFAULT_EXCHANGES = ['binance', 'variational', 'hyperliquid', 'aster', 'lighter', 'arcus', 'risex', 'txflow', 'qfex', 'popdex'];
 const loadExchangeStates = (names) => {
   let savedPrefs = {};
   try {
@@ -57,7 +57,6 @@ const getDashboardSignature = (item) => [
 const EXCHANGE_LABELS = {
   aster: 'Aster',
   arcus: 'Arcus',
-  bulk: 'Bulk',
   risex: 'RISEx',
   txflow: 'TxFlow',
   qfex: 'QFEX',

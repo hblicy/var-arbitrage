@@ -756,6 +756,8 @@ async def get_positions(
 @app.post("/api/positions")
 async def create_position(pos: PositionCreate, current_user: Dict = Depends(get_current_user)):
     """Add a new position tagged with the current user."""
+    if any(exchange.lower() not in settings.exchanges for exchange in (pos.long_exchange, pos.short_exchange)):
+        raise HTTPException(status_code=400, detail='Unknown exchange')
     
     # Auto-fill entry funding rates: 单边独立判断，缺哪边补哪边
     exchanges_data = latest_data.get("raw_exchanges_data", {})

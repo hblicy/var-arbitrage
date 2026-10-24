@@ -6,7 +6,6 @@ from collectors.lighter import LighterCollector
 from collectors.hyperliquid import HyperliquidCollector
 from collectors.aster import AsterCollector
 from collectors.arcus import ArcusCollector
-from collectors.bulk import BulkCollector
 from collectors.risex import RisexCollector
 from collectors.txflow import TxflowCollector
 from collectors.qfex import QfexCollector
@@ -20,7 +19,6 @@ COLLECTOR_MAP: Dict[str, Type[MarketCollector]] = {
     "hyperliquid": HyperliquidCollector,
     "aster": AsterCollector,
     "arcus": ArcusCollector,
-    "bulk": BulkCollector,
     "risex": RisexCollector,
     "txflow": TxflowCollector,
     "qfex": QfexCollector,

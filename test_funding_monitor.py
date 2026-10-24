@@ -25,13 +25,13 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.data = {
             'arcus': {'BTCUSDT': MarketDatum('BTCUSDT', 100, 0, 1000000, timestamp=NOW, exchange='Arcus',
                         native_interval_hours=1, best_bid=99.99, best_ask=100, next_funding_time=(NOW+600)*1000)},
-            'bulk': {'BTCUSDT': MarketDatum('BTCUSDT', 100, 0.001, 1000000, timestamp=NOW, exchange='Bulk',
+            'risex': {'BTCUSDT': MarketDatum('BTCUSDT', 100, 0.001, 1000000, timestamp=NOW, exchange='RISEx',
                         native_interval_hours=1, best_bid=100, best_ask=100.01, next_funding_time=(NOW+600)*1000)},
         }
         self.collectors = {key: AsyncMock() for key in self.data}
         self.collectors['arcus'].fetch_order_book.return_value = {'bids': [[99.99, 1000]], 'asks': [[100, 1000]], 'timestamp': NOW}
-        self.collectors['bulk'].fetch_order_book.return_value = {'bids': [[100, 1000]], 'asks': [[100.01, 1000]], 'timestamp': NOW}
-        self.history = {'BTCUSDT|arcus|bulk': {'coverage': 1, 'spread_mean_bps': 0, 'funding_mean_hourly_bps': 10}}
+        self.collectors['risex'].fetch_order_book.return_value = {'bids': [[100, 1000]], 'asks': [[100.01, 1000]], 'timestamp': NOW}
+        self.history = {'BTCUSDT|arcus|risex': {'coverage': 1, 'spread_mean_bps': 0, 'funding_mean_hourly_bps': 10}}
 
     async def cycle(self, now=NOW):
         for market_set in self.data.values():
@@ -56,7 +56,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         now = datetime(2026, 10, 23, 22, tzinfo=timezone.utc).timestamp()
         hours = {'tz': 'America/New_York', 'friday': [
             {'open': '00:00:00', 'close': '19:59:59', 'session': 'open'}]}
-        buy, sell = self.data['arcus']['BTCUSDT'], self.data['bulk']['BTCUSDT']
+        buy, sell = self.data['arcus']['BTCUSDT'], self.data['risex']['BTCUSDT']
         buy.funding_hours, buy.funding_rate, sell.funding_rate = hours, .002, .0012
         buy.next_funding_time = sell.next_funding_time = (now+3600)*1000
         with patch.object(self.store, 'summaries', return_value=self.history):
@@ -71,7 +71,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         await self.cycle()
         self.assertEqual(self.monitor.rows[0]['reason'], 'HISTORY_WARMUP')
         with patch.object(self.store, 'summaries', return_value=self.history):
-            self.collectors['bulk'].fetch_order_book.return_value['asks'] = [[100.01, 1]]
+            self.collectors['risex'].fetch_order_book.return_value['asks'] = [[100.01, 1]]
             await self.cycle(NOW+10)
         self.assertEqual(self.monitor.rows[0]['reason'], 'INSUFFICIENT_DEPTH')
         self.assertNotEqual(self.monitor.rows[0]['status'], 'triggered')
@@ -108,7 +108,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
                     with patch('time.time', return_value=NOW+offset):
                         await run_cycle(self.cfg, self.collectors, notifier, self.monitor)
                     if offset == 10:
-                        self.assertEqual(self.store.states['BTCUSDT|arcus|bulk']['status'], 'paused')
+                        self.assertEqual(self.store.states['BTCUSDT|arcus|risex']['status'], 'paused')
                         self.assertEqual(self.store.previous, {})
                 self.assertEqual(self.monitor.rows[0]['status'], 'pending')
                 self.assertEqual(self.monitor.rows[0]['qualified_seconds'], 0)
@@ -137,7 +137,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertGreaterEqual(row['depth']['expires_at'], clock[0])
                 delivered.append(opp.symbol)
             notified.set()
-        history = {**self.history, 'SLOWUSDT|arcus|bulk': {'coverage': 1}}
+        history = {**self.history, 'SLOWUSDT|arcus|risex': {'coverage': 1}}
         with patch('time.time', side_effect=lambda: clock[0]), \
                 patch.object(self.store, 'summaries', return_value=history):
             opps = analyse_markets(['BTCUSDT', 'SLOWUSDT'], self.data, self.cfg)[0]
@@ -151,19 +151,19 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
                 clock[0] = NOW+3
                 release_slow.set()
                 await task
-        fast = next(row for row in self.monitor.rows if row['key'] == 'BTCUSDT|arcus|bulk')
-        slow = next(row for row in self.monitor.rows if row['key'] == 'SLOWUSDT|arcus|bulk')
+        fast = next(row for row in self.monitor.rows if row['key'] == 'BTCUSDT|arcus|risex')
+        slow = next(row for row in self.monitor.rows if row['key'] == 'SLOWUSDT|arcus|risex')
         self.assertEqual(fast['status'], 'triggered')
         self.assertEqual(slow['reason'], 'QUOTE_FETCH_FAILED')
         self.assertEqual(self.monitor.snapshot(NOW+3)['rows'][0]['depth']['reason'], 'QUOTE_EXPIRED')
 
     async def test_shared_market_book_is_fetched_once(self):
         self.cfg.strategy.sustain_seconds = 0
-        self.data['binance'] = copy.deepcopy(self.data['bulk'])
+        self.data['binance'] = copy.deepcopy(self.data['risex'])
         self.data['binance']['BTCUSDT'].exchange = 'Binance'
         self.collectors['binance'] = AsyncMock()
         self.collectors['binance'].fetch_order_book.return_value = copy.deepcopy(
-            self.collectors['bulk'].fetch_order_book.return_value)
+            self.collectors['risex'].fetch_order_book.return_value)
         history = {**self.history, 'BTCUSDT|arcus|binance': {'coverage': 1}}
         notify = AsyncMock()
         with patch('time.time', return_value=NOW), patch.object(self.store, 'summaries', return_value=history):
@@ -197,14 +197,14 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(asyncio.CancelledError):
                     await task
         self.assertEqual(active, set())
-        state = self.store.states['BTCUSDT|arcus|bulk']
+        state = self.store.states['BTCUSDT|arcus|risex']
         self.assertEqual(state['status'], 'paused')
         self.assertEqual(state['reason'], 'SCAN_INTERRUPTED')
         self.assertEqual(state['qualified_seconds'], 0)
 
     async def test_failed_scan_resets_counter_before_recovery(self):
         self.cfg.strategy.sustain_seconds = 120
-        route = 'BTCUSDT|arcus|bulk'
+        route = 'BTCUSDT|arcus|risex'
         with patch.object(self.store, 'summaries', return_value=self.history):
             for offset in range(0, 101, 10):
                 await self.cycle(NOW+offset)
@@ -222,7 +222,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
         for collector in self.collectors.values():
             collector.fetch_order_book.side_effect = fetch
-        history = {**self.history, 'BADUSDT|arcus|bulk': {'coverage': 1}}
+        history = {**self.history, 'BADUSDT|arcus|risex': {'coverage': 1}}
         notify = AsyncMock()
         with patch('time.time', return_value=NOW+110), patch.object(self.store, 'summaries', return_value=history):
             opps = analyse_markets(['BTCUSDT', 'BADUSDT'], self.data, self.cfg)[0]
@@ -234,7 +234,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state['qualified_seconds'], 0)
         for symbol in ('BTCUSDT', 'BADUSDT'):
             row = next(row for row in self.monitor.snapshot(NOW+110)['rows']
-                       if row['key'] == f'{symbol}|arcus|bulk')
+                       if row['key'] == f'{symbol}|arcus|risex')
             self.assertEqual(row['reason'], 'SCAN_INTERRUPTED')
             self.assertIsNone(row['depth']['capacity'])
         self.assertEqual(self.store.events(route)[0]['status'], 'paused')
@@ -267,13 +267,13 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             collector.fetch_order_book.side_effect = fetch
         async def notify(opportunities):
             verified.set()
-        history = {**self.history, 'BADUSDT|arcus|bulk': {'coverage': 1}}
+        history = {**self.history, 'BADUSDT|arcus|risex': {'coverage': 1}}
         with patch('time.time', return_value=NOW), patch.object(self.store, 'summaries', return_value=history):
             opps = analyse_markets(['BTCUSDT', 'BADUSDT'], self.data, self.cfg)[0]
             with self.assertRaisesRegex(KeyError, 'timestamp'):
                 await self.monitor.process(opps, self.data, self.collectors, on_triggered=notify)
-        self.assertEqual(self.store.states['BTCUSDT|arcus|bulk']['status'], 'triggered')
-        self.assertEqual(self.store.states['BADUSDT|arcus|bulk']['status'], 'paused')
+        self.assertEqual(self.store.states['BTCUSDT|arcus|risex']['status'], 'triggered')
+        self.assertEqual(self.store.states['BADUSDT|arcus|risex']['status'], 'paused')
 
     async def test_unexpected_book_failure_propagates_and_drains_sibling(self):
         started = asyncio.Event()
@@ -288,7 +288,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             await started.wait()
             raise RuntimeError('unexpected parser failure')
         self.collectors['arcus'].fetch_order_book.side_effect = broken
-        self.collectors['bulk'].fetch_order_book.side_effect = blocked
+        self.collectors['risex'].fetch_order_book.side_effect = blocked
         with patch('time.time', return_value=NOW), patch.object(self.store, 'summaries', return_value=self.history):
             opps = analyse_markets(['BTCUSDT'], self.data, self.cfg)[0]
             with self.assertRaisesRegex(RuntimeError, 'unexpected parser failure'):
@@ -311,10 +311,10 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
                     await started.wait()
                     raise error
                 self.collectors['arcus'].fetch_order_book.side_effect = broken
-                self.collectors['bulk'].fetch_order_book.side_effect = blocked
+                self.collectors['risex'].fetch_order_book.side_effect = blocked
                 with patch('time.time', return_value=NOW):
                     with self.assertRaises(KeyError) as raised:
-                        await self.monitor.check('BTCUSDT', 'arcus', 'bulk', 8, self.data, self.collectors)
+                        await self.monitor.check('BTCUSDT', 'arcus', 'risex', 8, self.data, self.collectors)
                 self.assertIs(raised.exception, error)
                 self.assertTrue(stopped.is_set())
                 self.assertEqual(self.monitor._requests._value, 5)
@@ -322,7 +322,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             collector.fetch_order_book.side_effect = None
         with patch('time.time', return_value=NOW):
             result = await asyncio.wait_for(
-                self.monitor.check('BTCUSDT', 'arcus', 'bulk', 8, self.data, self.collectors), timeout=1)
+                self.monitor.check('BTCUSDT', 'arcus', 'risex', 8, self.data, self.collectors), timeout=1)
         self.assertIsNone(result['reason'])
 
     async def test_manual_cancellation_drains_both_books(self):
@@ -341,7 +341,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         for collector in self.collectors.values():
             collector.fetch_order_book.side_effect = blocked
         with patch('time.time', return_value=NOW):
-            task = asyncio.create_task(self.monitor.check('BTCUSDT', 'arcus', 'bulk', 8, self.data, self.collectors))
+            task = asyncio.create_task(self.monitor.check('BTCUSDT', 'arcus', 'risex', 8, self.data, self.collectors))
             try:
                 await asyncio.wait_for(started.wait(), timeout=1)
             finally:
@@ -388,20 +388,20 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
     async def test_source_stale_during_gather_is_rejected(self):
         self.collectors['arcus'].fetch_order_book.return_value['timestamp'] = NOW - 3
         with patch('time.time', return_value=NOW):
-            result = await self.monitor.check('BTCUSDT', 'arcus', 'bulk', 8, self.data, self.collectors)
+            result = await self.monitor.check('BTCUSDT', 'arcus', 'risex', 8, self.data, self.collectors)
         self.assertEqual(result['reason'], 'STALE_QUOTE')
 
     async def test_unsupported_routes_do_not_consume_depth_slots(self):
         with patch('time.time', return_value=NOW):
             target = analyse_markets(['BTCUSDT'], self.data, self.cfg)[0][0]
-            self.data['hyperliquid'] = self.data['bulk']
+            self.data['hyperliquid'] = self.data['risex']
             high = copy.deepcopy(target)
             high.details['sell_exchange'] = 'Hyperliquid'
             unsupported = [copy.deepcopy(high) for _ in range(20)]
             history = {**self.history, 'BTCUSDT|arcus|hyperliquid': {'coverage': 1}}
             with patch.object(self.store, 'summaries', return_value=history):
                 await self.monitor.process([*unsupported, target], self.data, self.collectors)
-        self.collectors['bulk'].fetch_order_book.assert_awaited_once()
+        self.collectors['risex'].fetch_order_book.assert_awaited_once()
         self.assertIsNone(target.details['funding_strategy']['depth']['reason'])
 
     async def test_missing_routes_pause_and_reset_existing_signals(self):
@@ -410,7 +410,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             await self.cycle(NOW+10)
             with patch('time.time', return_value=NOW+20):
                 await self.monitor.process([], {}, self.collectors)
-            self.assertEqual(self.store.states['BTCUSDT|arcus|bulk']['status'], 'paused')
+            self.assertEqual(self.store.states['BTCUSDT|arcus|risex']['status'], 'paused')
             await self.cycle(NOW+25)
             self.assertEqual(self.monitor.rows[0]['qualified_seconds'], 0)
 
@@ -425,9 +425,9 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.monitor.rows, original)
 
     async def test_upstream_error_is_visible(self):
-        self.collectors['bulk'].fetch_order_book.side_effect = TimeoutError('upstream timeout')
+        self.collectors['risex'].fetch_order_book.side_effect = TimeoutError('upstream timeout')
         with patch('time.time', return_value=NOW):
-            result = await self.monitor.check('BTCUSDT', 'arcus', 'bulk', 8, self.data, self.collectors)
+            result = await self.monitor.check('BTCUSDT', 'arcus', 'risex', 8, self.data, self.collectors)
         self.assertEqual(result['reason'], 'QUOTE_FETCH_FAILED')
 
     async def test_api_exposes_strategy_and_validates_horizon(self):
@@ -440,7 +440,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
                 response = await client.get('/api/funding')
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()['default_hours'], 8)
-                body = {'symbol': 'BTCUSDT', 'long_exchange': 'arcus', 'short_exchange': 'bulk', 'hours': 1}
+                body = {'symbol': 'BTCUSDT', 'long_exchange': 'arcus', 'short_exchange': 'risex', 'hours': 1}
                 result = await client.post('/api/funding/check', json=body)
                 self.assertEqual(result.status_code, 200)
                 self.assertIsNone(result.json()['reason'])
@@ -461,7 +461,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             return result
         with patch('time.time', side_effect=lambda: clock[0]), \
                 patch('funding_monitor.depth_scenarios', side_effect=slow_depth):
-            result = await self.monitor.check('BTCUSDT', 'arcus', 'bulk', 8, self.data, self.collectors)
+            result = await self.monitor.check('BTCUSDT', 'arcus', 'risex', 8, self.data, self.collectors)
         self.assertEqual(result['reason'], 'STALE_QUOTE')
         self.assertIsNone(result['capacity'])
 

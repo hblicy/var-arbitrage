@@ -10,7 +10,6 @@
 - **Hyperliquid** (`hyperliquid`) - **NEW in v1.6!** 深度流动性，1h 资金费率结算
 - **Aster** (`aster`) - REST API 版，吃单费率按 0.04% 计算
 - **Arcus** (`arcus`) - 公开 REST，1h 资金费率、L2 盘口复核
-- **Bulk** (`bulk`) - 公开 REST，整点 1h 资金费率、L2 盘口复核
 - **RISEx** (`risex`) - 公开 REST，按市场返回的资金费周期、L2 盘口复核
 - **TxFlow** (`txflow`) - 公开 REST + 批量资金费订阅，永续与 RWA、L2 盘口复核
 - **QFEX** (`qfex`) - 公开 REST + 全市场报价快照，保留 RWA 原币计价及资金费时段
@@ -18,25 +17,24 @@
 
 *(在 v1.6 中，Paradex 被移除并替换为 Hyperliquid，以获得更大的日均交易量和更好的价差捕捉能力。)*
 
-本次移除 Nado、GRVT、OndoPerps、Backpack。旧 `exchange_configs.json` 中的这些键会被忽略，旧浏览器偏好也不会恢复已移除的交易所。历史持仓和结算记录不删除，但移除所的行情不再更新。
+已移除 Nado、GRVT、OndoPerps、Backpack、Bulk。旧 `exchange_configs.json` 中的这些键会被忽略，旧浏览器偏好也不会恢复已移除的交易所。历史持仓和结算记录不删除，但移除所的行情不再更新，新持仓与盘口复核不再接受这些交易所。
 
-### Arcus / Bulk / RISEx 接入说明
+### Arcus / RISEx 接入说明
 
-三家均使用公开接口，无需交易 API Key。沿用当前只读监控和人工盘口复核流程，不会自动下单。
+两家均使用公开接口，无需交易 API Key。沿用当前只读监控和人工盘口复核流程，不会自动下单。
 
 | 交易所 | 默认吃单费率 | 资金费率字段 | 24h 成交额字段 |
 | --- | --- | --- | --- |
 | Arcus | 2.25 bps（0.0225%） | `nextFundingRate`，1h | `volume24hNotional` |
-| Bulk | 3.5 bps（0.035%） | `fundingRate`，1h | `quoteVolume` |
 | RISEx | 3.0 bps（0.03%） | `current_funding_rate`，周期由接口给出 | `quote_volume_24h` |
 
-费率按 2026-09-20 的标准账户口径设置，可用 `ARCUS_TAKER_FEE_BPS`、`BULK_TAKER_FEE_BPS`、`RISEX_TAKER_FEE_BPS` 覆盖实际账户费用。依据：[Arcus 主网费率表](https://api.arcus.xyz/v1/feeTiers)、[Bulk 官方费率](https://docs.bulk.trade/bulk-exchange/fees)、[RISEx 官方费率](https://docs.risechain.com/docs/risex/trading/fees)。
+费率按 2026-09-20 的标准账户口径设置，可用 `ARCUS_TAKER_FEE_BPS`、`RISEX_TAKER_FEE_BPS` 覆盖实际账户费用。依据：[Arcus 主网费率表](https://api.arcus.xyz/v1/feeTiers)、[RISEx 官方费率](https://docs.risechain.com/docs/risex/trading/fees)。
 
 - Arcus 缺少预测资金费率时显示缺失，不拿已结算费率替代；RISEx 不使用已废弃的 `predicted_funding_rate`，也不把 `funding_rate_8h` 当成小时费率再次放大。
-- RISEx 采集使用 `force_refresh=true` 绕过默认 5 分钟市场缓存。Bulk 的 REST 盘口参数是小写 `type=l2book`。
+- RISEx 采集使用 `force_refresh=true` 绕过默认 5 分钟市场缓存。
 - 原始币种保留映射到现有 `BTCUSDT` 等统一键；成交额使用 USD/USDC 名义金额，资金费率保留正负号与真实零值。
-- Arcus / Bulk 盘口按源时间戳检查新鲜度；RISEx REST 盘口不返回源时间戳，现有复核按请求完成时间检查时效。空盘口不会用标记价格伪造，接口失败会进入现有交易所错误状态。
-- 更新部署后重启后端并重新构建前端。对照 `env.example` 补充三家配置即可；原 `NADO_VARIATIONAL_WECHAT_WEBHOOK` 名称继续保留，避免现有推送配置失效。
+- Arcus 盘口按源时间戳检查新鲜度；RISEx REST 盘口不返回源时间戳，现有复核按请求完成时间检查时效。空盘口不会用标记价格伪造，接口失败会进入现有交易所错误状态。
+- 更新部署后重启后端并重新构建前端。对照 `env.example` 补充两家配置即可；原 `NADO_VARIATIONAL_WECHAT_WEBHOOK` 名称继续保留，避免现有推送配置失效。
 
 ### TxFlow / QFEX / PopDEX 接入说明
 
@@ -66,7 +64,7 @@
 面板默认进入资金费策略，可切换回“原始机会 / 价差复核”。持仓管理与退出提醒继续保留，不自动下单。
 
 - 支持 1/4/8/24h 持有情景，按两腿各自的下一结算时间与周期计数，拆分资金费、开仓价差、平仓价差成本和四笔吃单手续费。采用相同基础币数量对冲，收益分母为较大的一腿开仓名义金额，不是保证金。
-- 假设资金费率不变，退出使用当前反向盘口；不假设价差必然回归。缺少结算时间时按 UTC 周期推算并标记，Bulk 的整点时间也标记为推算。
+- 假设资金费率不变，退出使用当前反向盘口；不假设价差必然回归。缺少结算时间时按 UTC 周期推算并标记。
 - 分钟历史按报价有效时间加权，展示价差/小时资金费差曲线、均值、波动、正费差占比及覆盖率。断线不补数据，保留 48h；重启恢复历史，但连续达标计时重新开始。
 - 默认通知条件：8h 净收益至少 20 bps、4h 历史覆盖至少 80%、连续达标 120s，并且实时深度支持计划金额。首次启动至少约 3.2h 有效历史预热；预热期间可手动复核盘口。原 `NOTIFY_MIN_*` 不再控制这类通知，冷却、时间窗口和选所白名单仍生效。
 - 自动复核只检查具备深度接口的前 20 个达标方向，共享同一市场请求、并发上限 5。每条路线拿齐双边盘口后独立校验并通知，不等待其他路线的慢请求；通知仍受原有冷却和报价有效期限制。无深度接口的路线（包括当前 Variational 组合）只观察，不发送已核验资金费机会通知。
@@ -75,7 +73,7 @@
 
 配置见 `env.example` 的 `FUNDING_*`，计划金额和报价时效沿用 `ENTRY_CHECK_*`。新增历史库 `data/strategy.db` 与用户/持仓库分开，部署时应持久化 `data` 目录；历史预热与存储异常会影响信号可用性。更新后重启后端并重新构建前端。
 
-接口：`GET /api/funding` 获取策略快照；`GET /api/funding/history?symbol=BTCUSDT&long_exchange=arcus&short_exchange=bulk&hours=4` 查询历史与事件；`POST /api/funding/check` 接受同名路线参数及 `hours`，执行按需分档复核。接口只读行情，不产生交易。
+接口：`GET /api/funding` 获取策略快照；`GET /api/funding/history?symbol=BTCUSDT&long_exchange=arcus&short_exchange=binance&hours=4` 查询历史与事件；`POST /api/funding/check` 接受同名路线参数及 `hours`，执行按需分档复核。接口只读行情，不产生交易。
 
 ### 原有监控能力
 

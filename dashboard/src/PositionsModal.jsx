@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 const AUTH_KEY = 'pos_auth_v2'; // upgraded key
 const REFRESH_MS = 30000;
-const POSITION_EXCHANGES = ['variational', 'binance', 'hyperliquid', 'aster', 'lighter', 'arcus', 'bulk', 'risex', 'txflow', 'qfex', 'popdex'];
+const POSITION_EXCHANGES = ['variational', 'binance', 'hyperliquid', 'aster', 'lighter', 'arcus', 'risex', 'txflow', 'qfex', 'popdex'];
 
 const PositionsModal = ({ isOpen, onClose }) => {
     // ── Auth state ─────────────────────────────────────────────
