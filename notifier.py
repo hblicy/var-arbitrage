@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional
 
-from config import NotificationSettings
+from config import NotificationSettings, ThresholdSettings
 from models import ArbitrageOpportunity
 
 logger = logging.getLogger(__name__)
@@ -18,6 +18,37 @@ def _is_binance_variational_route(opportunity: ArbitrageOpportunity) -> bool:
     buy_exchange = str(opportunity.details.get("buy_exchange", "")).lower()
     sell_exchange = str(opportunity.details.get("sell_exchange", "")).lower()
     return {buy_exchange, sell_exchange} == {"binance", "variational"}
+
+
+def select_binance_variational_alerts(
+    opportunities: Iterable[ArbitrageOpportunity], thresholds: ThresholdSettings,
+) -> List[ArbitrageOpportunity]:
+    items = []
+    for opp in opportunities:
+        if not _is_binance_variational_route(opp) or opp.funding_diff is None:
+            continue
+        details = opp.details
+        funding_daily = details.get("funding_daily_bps")
+        projected_24h = details.get("projected_24h_bps")
+        if funding_daily is None or projected_24h is None:
+            continue
+        intervals = details.get("native_intervals", {})
+        if intervals.get("buy", 8) > intervals.get("sell", 8):
+            continue
+        spread = opp.net_spread_bps
+        cover_hours = details.get("cover_hours")
+        aligned = spread >= thresholds.notify_min_spread_bps
+        funding_cover = (
+            spread < 0
+            and cover_hours is not None
+            and cover_hours <= thresholds.notify_max_cover_hours
+        )
+        if (aligned or funding_cover) and (
+            funding_daily >= thresholds.notify_min_funding_bps
+            and projected_24h >= thresholds.notify_min_total_bps
+        ):
+            items.append(opp)
+    return items
 
 
 class WeChatNotifier:
@@ -325,9 +356,10 @@ def _format_text(items: Iterable[ArbitrageOpportunity]) -> str:
         if details.get("suggest_limit_order"):
             limit_note = "\n⚡ 建议使用限价单（滑点风险高）"
 
+        verification_note = "\n原始机会 · 未经深度核验" if _is_binance_variational_route(opp) else ""
         lines.append(
             (
-                f"\n{opp.symbol}\n"
+                f"\n{opp.symbol}{verification_note}\n"
                 f"类型：{_opportunity_type_label(opportunity_type)}\n"
                 f"方向：{_exchange_name(buy_ex)} 做多 / {_exchange_name(sell_ex)} 做空\n"
                 f"价格：Long {_format_price(buy_price)} | Short {_format_price(sell_price)}\n"
