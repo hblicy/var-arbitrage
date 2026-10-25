@@ -18,7 +18,7 @@ from collectors.lighter import LighterCollector
 from collectors.hyperliquid import HyperliquidCollector
 from config import Settings, settings
 from entry_check import annotate_entry_check_support
-from notifier import WeChatNotifier
+from notifier import WeChatNotifier, select_binance_variational_alerts
 from market_state import stamp_market_timestamps
 from funding_monitor import FundingMonitor
 from position_tracker import accumulate_funding, update_pre_settlement_rates
@@ -75,6 +75,9 @@ async def run_cycle(
     opportunities, _, _ = analyse_markets(symbols_to_analyze, exchanges_data, cfg)
     annotate_entry_check_support(opportunities, collectors)
     if funding_monitor is not None:
+        raw_alerts = select_binance_variational_alerts(opportunities, cfg.thresholds)
+        if raw_alerts:
+            await notifier.send(raw_alerts)
         await funding_monitor.process(opportunities, exchanges_data, collectors, on_triggered=notifier.send)
         opportunities = [opp for opp in opportunities if opp.details['funding_strategy']['status'] == 'triggered']
     if opportunities:

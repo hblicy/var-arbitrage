@@ -20,7 +20,7 @@ from config import get_taker_fee_bps, settings
 from collectors.variational import VariationalCollector
 from collectors.binance import BinanceCollector
 from analyzer import analyse_markets
-from notifier import WeChatNotifier
+from notifier import WeChatNotifier, select_binance_variational_alerts
 from entry_check import annotate_entry_check_support, entry_check_supported as has_entry_check_support, evaluate_entry_quote
 from market_state import dashboard_snapshot, replace_exchange_snapshot
 from funding_monitor import FundingMonitor, route_key
@@ -468,6 +468,10 @@ async def update_data_loop():
             # Trigger analysis and update state (analyze ALL data)
             opportunities = await perform_analysis()
             
+            raw_alerts = select_binance_variational_alerts(opportunities, settings.thresholds)
+            if raw_alerts:
+                await notifier.send(raw_alerts)
+
             if funding_monitor is not None:
                 await funding_monitor.process(opportunities, latest_data["raw_exchanges_data"], collectors_hub,
                                               on_triggered=notifier.send)
