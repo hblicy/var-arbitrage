@@ -462,8 +462,11 @@ class Settings:
             print(f"Error loading runtime config: {e}")
 
 
-def get_taker_fee_bps(exchange, symbol: str) -> float:
+def get_taker_fee_bps(exchange, symbol: str, *, exchange_key: Optional[str] = None) -> float:
     if exchange is None:
+        # Preserve estimates for retired positions without registering the exchange.
+        if exchange_key == 'bulk':
+            return _env_float('BULK_TAKER_FEE_BPS', 3.5)
         return 5.0
     return getattr(exchange, "symbol_taker_bps", {}).get(symbol, exchange.taker_bps)
 

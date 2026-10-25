@@ -19,6 +19,8 @@
 
 已移除 Nado、GRVT、OndoPerps、Backpack、Bulk。旧 `exchange_configs.json` 中的这些键会被忽略，旧浏览器偏好也不会恢复已移除的交易所。历史持仓和结算记录不删除，但移除所的行情不再更新，新持仓与盘口复核不再接受这些交易所。
 
+Bulk 遗留持仓的手续费估算继续使用原 `BULK_TAKER_FEE_BPS` 覆盖值，默认 3.5 bps。
+
 ### Arcus / RISEx 接入说明
 
 两家均使用公开接口，无需交易 API Key。沿用当前只读监控和人工盘口复核流程，不会自动下单。

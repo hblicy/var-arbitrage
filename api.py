@@ -849,8 +849,8 @@ async def get_positions_with_pnl(
         # Get exchange-specific taker fees
         long_cfg = settings.exchanges.get(long_ex)
         short_cfg = settings.exchanges.get(short_ex)
-        long_taker = get_taker_fee_bps(long_cfg, symbol)
-        short_taker = get_taker_fee_bps(short_cfg, symbol)
+        long_taker = get_taker_fee_bps(long_cfg, symbol, exchange_key=long_ex)
+        short_taker = get_taker_fee_bps(short_cfg, symbol, exchange_key=short_ex)
 
         # Inject current funding rates from live market data
         pos_copy = pos.copy()

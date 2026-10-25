@@ -223,6 +223,34 @@ class AdditionalCollectors(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows, [legacy])
         read.assert_called_once_with(owner_id='test-user', status='open')
 
+    async def test_existing_bulk_position_fee_estimates_keep_the_original_rate(self):
+        import os
+        import api
+        cfg = Settings()
+        cfg.binance.taker_bps = 5
+        for override, bulk_fee in ((None, 3.5), ('1', 1), ('0', 0), ('invalid', 3.5)):
+            for bulk_leg in ('long', 'short'):
+                long_ex, short_ex = ('bulk', 'binance') if bulk_leg == 'long' else ('binance', 'bulk')
+                pos = {'id': 'legacy', 'symbol': 'BTCUSDT', 'long_exchange': long_ex,
+                       'short_exchange': short_ex, 'entry_qty': 100, 'entry_price_long': 100,
+                       'entry_price_short': 100, 'entry_time': '2026-10-24T00:00:00', 'cumulative_funding': 18}
+                original = dict(pos)
+                with self.subTest(override=override, bulk_leg=bulk_leg), patch.dict(os.environ), \
+                        patch.object(api, 'settings', cfg), \
+                        patch.dict(api.latest_data, {'raw_exchanges_data': {}}), \
+                        patch('db.get_positions', return_value=[pos]):
+                    if override is None:
+                        os.environ.pop('BULK_TAKER_FEE_BPS', None)
+                    else:
+                        os.environ['BULK_TAKER_FEE_BPS'] = override
+                    rows = await api.get_positions_with_pnl({'id': 'test-user', 'role': 'trader'},
+                        all_users=False, owner=None)
+                    expected_fees = 2 * (bulk_fee + 5)
+                    self.assertEqual(rows['legacy']['pnl']['total_fees'], expected_fees)
+                    self.assertEqual(rows['legacy']['pnl']['net_pnl'], 18-expected_fees)
+                    self.assertEqual(pos, original)
+                    self.assertNotIn('bulk', set(cfg.exchanges))
+
     def setUp(self):
         self.clock = patch('time.time', return_value=NOW)
         self.clock.start()
