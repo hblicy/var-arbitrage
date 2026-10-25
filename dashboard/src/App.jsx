@@ -10,7 +10,7 @@ import {
 const STORAGE_KEY = 'arbitrage_exchange_prefs';
 const MIN_EXCHANGES_REQUIRED = 2;
 const POLL_INTERVAL_MS = 10000;
-const DEFAULT_EXCHANGES = ['binance', 'variational', 'hyperliquid', 'aster', 'lighter', 'arcus', 'bulk', 'risex', 'txflow', 'qfex', 'popdex'];
+const DEFAULT_EXCHANGES = ['binance', 'variational', 'hyperliquid', 'aster', 'lighter', 'arcus', 'risex', 'txflow', 'qfex', 'popdex'];
 const loadExchangeStates = (names) => {
   let savedPrefs = {};
   try {
@@ -57,7 +57,6 @@ const getDashboardSignature = (item) => [
 const EXCHANGE_LABELS = {
   aster: 'Aster',
   arcus: 'Arcus',
-  bulk: 'Bulk',
   risex: 'RISEx',
   txflow: 'TxFlow',
   qfex: 'QFEX',
@@ -379,12 +378,29 @@ function App() {
     const controller = new AbortController();
     abortControllerRef.current = controller;
     let timedOut = false;
+    let responseStatus = null;
+    let contentType = null;
+    let phase = 'request';
+    const started = performance.now();
     const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 30000);
     try {
       const response = await fetch('/api/data', { cache: 'no-store', signal: controller.signal });
-      if (!response.ok) throw new Error('Network response was not ok');
+      responseStatus = response.status;
+      contentType = response.headers.get('content-type');
+      phase = 'headers';
+      if (!response.ok) throw new Error(`Dashboard HTTP ${responseStatus}`);
 
-      const nextData = normalizeDashboardData(await response.json());
+      phase = 'body';
+      const payload = await response.json();
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
+          !payload.markets || typeof payload.markets !== 'object' || Array.isArray(payload.markets) ||
+          !Array.isArray(payload.opportunities)) {
+        const failure = new Error('Invalid dashboard response');
+        failure.name = 'DashboardResponseError';
+        throw failure;
+      }
+      phase = 'data';
+      const nextData = normalizeDashboardData(payload);
       if (abortControllerRef.current !== controller) return;
 
       setData((prevData) => {
@@ -396,8 +412,18 @@ function App() {
       setError(null);
     } catch (err) {
       if (abortControllerRef.current !== controller || (err.name === 'AbortError' && !timedOut)) return;
-      setError(timedOut ? '行情数据加载超时，将自动重试。' : '连接后端失败，请确认 api.py 正在运行。');
-      console.error('Fetch error:', err);
+      let message;
+      if (timedOut) message = '行情数据加载超时（30 秒），将自动重试。';
+      else if (responseStatus !== null && (responseStatus < 200 || responseStatus >= 300)) {
+        message = `行情接口返回 HTTP ${responseStatus}，将自动重试。`;
+      } else if (err.name === 'SyntaxError' || err.name === 'DashboardResponseError') {
+        message = `行情响应格式异常（HTTP ${responseStatus}），将自动重试。`;
+      } else if (phase === 'body') message = `行情响应读取失败（HTTP ${responseStatus}），将自动重试。`;
+      else if (phase === 'request') message = '行情请求网络连接异常，将自动重试。';
+      else message = '行情数据处理失败，请查看浏览器控制台。';
+      setError(message);
+      console.error('Dashboard request failed', { url: '/api/data', phase, status: responseStatus,
+        elapsed_ms: Math.round(performance.now()-started), content_type: contentType }, err);
     } finally {
       clearTimeout(timeout);
       if (abortControllerRef.current === controller) {
@@ -626,7 +652,7 @@ function App() {
         </div>
       </header>
 
-        {error && <div className="error-banner">{error}</div>}
+        {error && <div className="error-banner" role="alert">{error} <button className="refresh-btn" type="button" onClick={() => fetchData({ force: true })}>重试行情</button></div>}
         {exchangeError && <div className="error-banner" role="alert">{exchangeError} <button type="button" onClick={fetchExchanges}>重试</button></div>}
         {unavailableExchanges.length > 0 && (
           <div className="stale-banner">

@@ -383,13 +383,6 @@ class Settings:
         taker_bps=_env_float("ARCUS_TAKER_FEE_BPS", 2.25),
         min_volume_usd=_env_float("ARCUS_MIN_VOLUME_USD", 0.0),
     ))
-    bulk: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
-        name="Bulk",
-        base_url=os.getenv("BULK_BASE_URL", "https://exchange-api.bulk.trade"),
-        timeout=_env_float("BULK_HTTP_TIMEOUT", 10.0),
-        taker_bps=_env_float("BULK_TAKER_FEE_BPS", 3.5),
-        min_volume_usd=_env_float("BULK_MIN_VOLUME_USD", 0.0),
-    ))
     risex: ExchangeSettings = field(default_factory=lambda: ExchangeSettings(
         name="RISEx",
         base_url=os.getenv("RISEX_BASE_URL", "https://api.rise.trade"),
@@ -437,7 +430,6 @@ class Settings:
             "aster": self.aster,
             "lighter": self.lighter,
             "arcus": self.arcus,
-            "bulk": self.bulk,
             "risex": self.risex,
             "txflow": self.txflow,
             "qfex": self.qfex,
@@ -470,8 +462,11 @@ class Settings:
             print(f"Error loading runtime config: {e}")
 
 
-def get_taker_fee_bps(exchange, symbol: str) -> float:
+def get_taker_fee_bps(exchange, symbol: str, *, exchange_key: Optional[str] = None) -> float:
     if exchange is None:
+        # Preserve estimates for retired positions without registering the exchange.
+        if exchange_key == 'bulk':
+            return _env_float('BULK_TAKER_FEE_BPS', 3.5)
         return 5.0
     return getattr(exchange, "symbol_taker_bps", {}).get(symbol, exchange.taker_bps)
 

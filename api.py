@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Literal
 from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 import sys
@@ -199,6 +200,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Cross-Exchange Arbitrage Monitor", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # Enable CORS for frontend development
 app.add_middleware(
@@ -756,6 +758,8 @@ async def get_positions(
 @app.post("/api/positions")
 async def create_position(pos: PositionCreate, current_user: Dict = Depends(get_current_user)):
     """Add a new position tagged with the current user."""
+    if any(exchange.lower() not in settings.exchanges for exchange in (pos.long_exchange, pos.short_exchange)):
+        raise HTTPException(status_code=400, detail='Unknown exchange')
     
     # Auto-fill entry funding rates: 单边独立判断，缺哪边补哪边
     exchanges_data = latest_data.get("raw_exchanges_data", {})
@@ -845,8 +849,8 @@ async def get_positions_with_pnl(
         # Get exchange-specific taker fees
         long_cfg = settings.exchanges.get(long_ex)
         short_cfg = settings.exchanges.get(short_ex)
-        long_taker = get_taker_fee_bps(long_cfg, symbol)
-        short_taker = get_taker_fee_bps(short_cfg, symbol)
+        long_taker = get_taker_fee_bps(long_cfg, symbol, exchange_key=long_ex)
+        short_taker = get_taker_fee_bps(short_cfg, symbol, exchange_key=short_ex)
 
         # Inject current funding rates from live market data
         pos_copy = pos.copy()

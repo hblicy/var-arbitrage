@@ -15,7 +15,7 @@ function initialStates(saved) {
 
 test('exchange controls exist before the first server response and retain saved choices', () => {
   const states = initialStates('{"binance":false,"qfex":true}');
-  assert.equal(states.length, 11);
+  assert.equal(states.length, 10);
   assert.equal(states.find(ex => ex.name === 'binance').enabled, false);
   assert.equal(states.find(ex => ex.name === 'qfex').enabled, true);
   assert.equal(states.find(ex => ex.name === 'popdex').enabled, true);
@@ -23,9 +23,18 @@ test('exchange controls exist before the first server response and retain saved 
 
 test('invalid saved preferences cannot remove the exchange controls', () => {
   for (const saved of ['null', '[]', 'broken json', '{"qfex":"false"}']) {
-    assert.equal(initialStates(saved).length, 11);
+    assert.equal(initialStates(saved).length, 10);
     assert.equal(initialStates(saved).find(ex => ex.name === 'qfex').enabled, true);
   }
+});
+
+test('old Bulk preferences cannot restore the removed exchange or position option', async () => {
+  assert.equal(initialStates('{"bulk":true}').some(ex => ex.name === 'bulk'), false);
+  const positions = await readFile(new URL('./PositionsModal.jsx', import.meta.url), 'utf8');
+  const expression = positions.match(/const POSITION_EXCHANGES = ([^;]+);/)[1];
+  const exchanges = runInNewContext(expression);
+  assert.equal(exchanges.length, 10);
+  assert.equal(exchanges.includes('bulk'), false);
 });
 
 function setup(responses, saved = '{}') {

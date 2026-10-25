@@ -41,15 +41,15 @@ class RwaCalculations(unittest.TestCase):
     def test_fees_follow_the_symbol_instead_of_one_exchange_flat_fee(self):
         cfg = Settings()
         cfg.arcus.symbol_taker_bps = {'AAPLUSDT': 10}
-        data = {'arcus': {'AAPLUSDT': market()}, 'bulk': {'AAPLUSDT': market()}}
+        data = {'arcus': {'AAPLUSDT': market()}, 'risex': {'AAPLUSDT': market()}}
         opportunities = analyse_markets(['AAPLUSDT'], data, cfg)[0]
         long_arcus = next(o for o in opportunities if o.direction.startswith('arcus_long'))
-        self.assertAlmostEqual(long_arcus.net_spread_bps, (99 / 101 - 1) * 10000 - 13.5)
+        self.assertAlmostEqual(long_arcus.net_spread_bps, (99 / 101 - 1) * 10000 - 13)
 
     def test_native_quote_currency_cannot_pair_with_usd_even_with_an_override(self):
         cfg = Settings()
         data = {'arcus': {'AAPLUSDT': market(quote_currency='KRW')},
-                'bulk': {'AAPLUSDT': market(quote_currency='USD')}}
+                'risex': {'AAPLUSDT': market(quote_currency='USD')}}
         self.assertEqual(analyse_markets(['AAPLUSDT'], data, cfg)[0], [])
 
     def test_non_usd_projection_does_not_report_native_amounts_as_dollars(self):
@@ -72,7 +72,7 @@ class RwaCalculations(unittest.TestCase):
 
     def test_raw_opportunity_daily_estimate_also_observes_market_hours(self):
         data = {'arcus': {'AAPLUSDT': market(funding_rate=0)},
-                'bulk': {'AAPLUSDT': market(funding_hours=HOURS)}}
+                'risex': {'AAPLUSDT': market(funding_hours=HOURS)}}
         row = analyse_markets(['AAPLUSDT'], data, Settings())[0][0]
         self.assertAlmostEqual(row.details['funding_diff_24h_bps'], 20)
         self.assertIsNone(row.details['cover_hours'])
@@ -81,7 +81,7 @@ class RwaCalculations(unittest.TestCase):
         hours = copy.deepcopy(HOURS)
         hours['friday'][0]['close'] = '18:29:59'
         data = {'arcus': {'AAPLUSDT': market(funding_rate=0)},
-                'bulk': {'AAPLUSDT': market(funding_hours=hours)}}
+                'risex': {'AAPLUSDT': market(funding_hours=hours)}}
         row = analyse_markets(['AAPLUSDT'], data, Settings())[0][0]
         self.assertIsNone(row.details['projected_24h_bps'])
         self.assertEqual(row.details['funding_projection_reason'], 'FUNDING_SCHEDULE_UNCERTAIN')
@@ -110,12 +110,12 @@ class RwaCalculations(unittest.TestCase):
 
     def test_native_currency_pairs_keep_basis_point_comparisons(self):
         data = {'arcus': {'AAPLUSDT': market(quote_currency='SEK')},
-                'bulk': {'AAPLUSDT': market(quote_currency='SEK')}}
+                'risex': {'AAPLUSDT': market(quote_currency='SEK')}}
         self.assertEqual(len(analyse_markets(['AAPLUSDT'], data, Settings())[0]), 2)
 
     def test_missing_rwa_rate_cannot_become_zero_in_the_daily_estimate(self):
         data = {'arcus': {'AAPLUSDT': market(funding_rate=0)},
-                'bulk': {'AAPLUSDT': market(funding_hours=HOURS, funding_rate=None)}}
+                'risex': {'AAPLUSDT': market(funding_hours=HOURS, funding_rate=None)}}
         row = analyse_markets(['AAPLUSDT'], data, Settings())[0][0]
         self.assertIsNone(row.details['funding_diff_24h_bps'])
         self.assertEqual(row.details['funding_projection_reason'], 'FUNDING_UNAVAILABLE')
@@ -152,7 +152,7 @@ class RwaCalculations(unittest.TestCase):
         entry = datetime(2026, 10, 24, tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
         item = market(funding_hours=HOURS, next_funding_time=datetime(
             2026, 10, 26, 7, tzinfo=timezone.utc).timestamp()*1000)
-        pos = {'symbol': 'AAPLUSDT', 'long_exchange': 'qfex', 'short_exchange': 'bulk',
+        pos = {'symbol': 'AAPLUSDT', 'long_exchange': 'qfex', 'short_exchange': 'risex',
                'entry_qty': 10, 'entry_price_long': 100, 'entry_time': entry.isoformat(),
                'last_settlement_long': entry.isoformat(), 'cumulative_funding': 0, 'funding_history': []}
         with patch.object(tracker, 'datetime', Frozen), \
@@ -170,8 +170,8 @@ class RwaCalculations(unittest.TestCase):
                 value = datetime.fromtimestamp(NOW, timezone.utc)
                 return value.astimezone(tz) if tz else value.astimezone().replace(tzinfo=None)
         data = {'qfex': {'AAPLUSDT': market(funding_hours=HOURS, funding_rate=.002)},
-                'bulk': {'AAPLUSDT': market(funding_rate=.0012)}}
-        pos = {'id': 'p', 'symbol': 'AAPLUSDT', 'long_exchange': 'qfex', 'short_exchange': 'bulk'}
+                'risex': {'AAPLUSDT': market(funding_rate=.0012)}}
+        pos = {'id': 'p', 'symbol': 'AAPLUSDT', 'long_exchange': 'qfex', 'short_exchange': 'risex'}
         cfg = Settings()
         cfg.thresholds.funding_reversal_threshold_minutes = 0
         with patch.object(tracker, 'datetime', Frozen), \
@@ -190,6 +190,7 @@ class RwaCalculations(unittest.TestCase):
 
 class Response:
     def __init__(self, payload):
+        self.status_code = 200
         self.payload = payload
 
     def raise_for_status(self):
@@ -200,6 +201,56 @@ class Response:
 
 
 class AdditionalCollectors(unittest.IsolatedAsyncioTestCase):
+    async def test_bulk_is_absent_from_the_exchange_api_and_new_positions(self):
+        import api
+        from fastapi import HTTPException
+        self.assertNotIn('bulk', {row['name'] for row in await api.get_exchanges()})
+        for leg in ('long_exchange', 'short_exchange'):
+            pair = {'long_exchange': 'arcus', 'short_exchange': 'binance', leg: 'bulk'}
+            pos = api.PositionCreate(symbol='BTCUSDT', **pair)
+            with self.subTest(leg=leg), patch.object(api, 'add_position') as add:
+                with self.assertRaises(HTTPException) as caught:
+                    await api.create_position(pos, {'id': 'test-user', 'username': 'test'})
+                self.assertEqual(caught.exception.status_code, 400)
+                add.assert_not_called()
+
+    async def test_existing_bulk_position_records_remain_readable(self):
+        import api
+        legacy = {'symbol': 'BTCUSDT', 'long_exchange': 'bulk', 'short_exchange': 'binance'}
+        with patch('db.get_positions', return_value=[legacy]) as read:
+            rows = await api.get_positions({'id': 'test-user', 'role': 'trader'},
+                all_users=False, owner=None, status_filter='open')
+        self.assertEqual(rows, [legacy])
+        read.assert_called_once_with(owner_id='test-user', status='open')
+
+    async def test_existing_bulk_position_fee_estimates_keep_the_original_rate(self):
+        import os
+        import api
+        cfg = Settings()
+        cfg.binance.taker_bps = 5
+        for override, bulk_fee in ((None, 3.5), ('1', 1), ('0', 0), ('invalid', 3.5)):
+            for bulk_leg in ('long', 'short'):
+                long_ex, short_ex = ('bulk', 'binance') if bulk_leg == 'long' else ('binance', 'bulk')
+                pos = {'id': 'legacy', 'symbol': 'BTCUSDT', 'long_exchange': long_ex,
+                       'short_exchange': short_ex, 'entry_qty': 100, 'entry_price_long': 100,
+                       'entry_price_short': 100, 'entry_time': '2026-10-24T00:00:00', 'cumulative_funding': 18}
+                original = dict(pos)
+                with self.subTest(override=override, bulk_leg=bulk_leg), patch.dict(os.environ), \
+                        patch.object(api, 'settings', cfg), \
+                        patch.dict(api.latest_data, {'raw_exchanges_data': {}}), \
+                        patch('db.get_positions', return_value=[pos]):
+                    if override is None:
+                        os.environ.pop('BULK_TAKER_FEE_BPS', None)
+                    else:
+                        os.environ['BULK_TAKER_FEE_BPS'] = override
+                    rows = await api.get_positions_with_pnl({'id': 'test-user', 'role': 'trader'},
+                        all_users=False, owner=None)
+                    expected_fees = 2 * (bulk_fee + 5)
+                    self.assertEqual(rows['legacy']['pnl']['total_fees'], expected_fees)
+                    self.assertEqual(rows['legacy']['pnl']['net_pnl'], 18-expected_fees)
+                    self.assertEqual(pos, original)
+                    self.assertNotIn('bulk', set(cfg.exchanges))
+
     def setUp(self):
         self.clock = patch('time.time', return_value=NOW)
         self.clock.start()
@@ -346,18 +397,18 @@ class AdditionalCollectors(unittest.IsolatedAsyncioTestCase):
     async def test_manual_entry_never_labels_a_native_currency_book_as_usd(self):
         import api
         book = {'bids': [[99, 20]], 'asks': [[101, 20]], 'timestamp': NOW, 'quote_currency': 'SEK'}
-        collectors = {key: AsyncMock() for key in ('arcus', 'bulk')}
+        collectors = {key: AsyncMock() for key in ('arcus', 'risex')}
         for collector in collectors.values():
             collector.fetch_order_book.return_value = book
         with patch.object(api, 'collectors_hub', collectors):
-            result = await api.evaluate_manual_entry('SIVESEK', 'arcus', 'bulk')
+            result = await api.evaluate_manual_entry('SIVESEK', 'arcus', 'risex')
         self.assertEqual(result['reason'], 'NON_USD_QUOTE')
 
     async def test_native_currency_position_cannot_enter_the_usd_pnl_ledger(self):
         import api
         from fastapi import HTTPException
         data = {'qfex': {'SIVESEK': market(quote_currency='SEK')}}
-        pos = api.PositionCreate(symbol='SIVESEK', long_exchange='qfex', short_exchange='bulk')
+        pos = api.PositionCreate(symbol='SIVESEK', long_exchange='qfex', short_exchange='risex')
         with patch.dict(api.latest_data, {'raw_exchanges_data': data}), patch.object(api, 'add_position') as add:
             with self.assertRaises(HTTPException) as caught:
                 await api.create_position(pos, {'id': 'test-user', 'username': 'test'})

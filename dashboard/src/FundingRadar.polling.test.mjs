@@ -17,7 +17,8 @@ for (const [file, name, ref] of [['FundingRadar.jsx', 'refresh', 'scanAbort'], [
       clearTimeout: id => timers.delete(id),
       fetch: (_url, { signal }) => new Promise((resolve, reject) => {
         signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
-        pending.push({ signal, finish: () => resolve({ ok: true, json: async () => ({}) }) });
+        pending.push({ signal, finish: () => resolve({ ok: true, status: 200,
+          headers: { get: () => 'application/json' }, json: async () => ({ markets: {}, opportunities: [] }) }) });
       }),
     };
     return { run: runInNewContext(`(${callback})`, context), pending, errors, timers, published: () => published };

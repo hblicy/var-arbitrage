@@ -19,7 +19,7 @@ from notifier import WeChatNotifier
 
 
 NOW = 1789871500.0
-EXCHANGES = {"binance", "variational", "hyperliquid", "aster", "lighter", "arcus", "bulk", "risex", "txflow", "qfex", "popdex"}
+EXCHANGES = {"binance", "variational", "hyperliquid", "aster", "lighter", "arcus", "risex", "txflow", "qfex", "popdex"}
 ARCUS = {
     "marketDisplayName": "BTC-USD", "baseAsset": "BTC", "quoteAsset": "USD",
     "marketId": 1, "status": "ONLINE", "type": "PERPETUAL",
@@ -34,12 +34,6 @@ RISEX = {
     "funding_interval": "3600000000000", "next_funding_time": "1789873200000000000",
     "current_funding_rate": "-0.0000125", "funding_rate_8h": "-0.0001",
     "predicted_funding_rate": "0", "reduce_only": False,
-}
-BULK_MARKET = {"symbol": "SOL-USD", "baseAsset": "SOL", "quoteAsset": "USD", "status": "TRADING"}
-BULK_TICKER = {
-    "symbol": "SOL-USD", "lastPrice": 100, "markPrice": 100.1,
-    "volume": 10, "quoteVolume": 1000000, "fundingRate": -0.0000125,
-    "timestamp": int(NOW * 1e9),
 }
 
 
@@ -60,8 +54,7 @@ class ExchangeClient:
     def __init__(self, key):
         self.key = key
         self.calls = []
-        self.market = copy.deepcopy({"arcus": ARCUS, "bulk": BULK_MARKET, "risex": RISEX}[key])
-        self.ticker = copy.deepcopy(BULK_TICKER)
+        self.market = copy.deepcopy({"arcus": ARCUS, "risex": RISEX}[key])
         self.book_time = NOW
         self.empty_book = False
         self.fail_book = False
@@ -71,10 +64,6 @@ class ExchangeClient:
         self.calls.append((path, params))
         if self.key == "arcus" and path == "/v1/markets":
             return Response({"markets": [self.market]})
-        if self.key == "bulk" and path == "/api/v1/exchangeInfo":
-            return Response([self.market])
-        if self.key == "bulk" and path == "/api/v1/ticker/SOL-USD":
-            return Response(self.ticker)
         if self.key == "risex" and path == "/v1/markets":
             if params != {"force_refresh": "true"}:
                 raise AssertionError("RISEx live data must bypass the five-minute cache")
@@ -87,12 +76,6 @@ class ExchangeClient:
             bids = [[float("nan"), 20]]
         if self.key == "arcus" and path == "/v1/l2OrderBook/BTC-USD":
             return Response({"bids": bids, "asks": asks, "timestamp": int(self.book_time * 1e6)})
-        if self.key == "bulk" and path == "/api/v1/l2book":
-            if params.get("type") != "l2book" or params.get("coin") != "SOL-USD":
-                raise AssertionError("Bulk requires lowercase l2book and native coin")
-            return Response({"symbol": "SOL-USD", "updateType": "snapshot",
-                             "levels": [[{"px": p, "sz": s, "n": 1} for p, s in side] for side in (bids, asks)],
-                             "timestamp": int(self.book_time * 1e9)})
         if self.key == "risex" and path == "/v1/orderbook":
             if str(params.get("market_id")) != "5":
                 raise AssertionError("RISEx must use its numeric market ID")
@@ -102,6 +85,12 @@ class ExchangeClient:
 
 
 class TestExchangeRegistry(unittest.TestCase):
+    def test_bulk_is_removed_from_settings_and_factory(self):
+        from config import ExchangeSettings
+        self.assertNotIn('bulk', set(Settings().exchanges))
+        with self.assertRaisesRegex(ValueError, 'Unknown exchange key: bulk'):
+            create_collector('bulk', ExchangeSettings(name='Bulk', base_url='https://example.invalid'))
+
     def test_stamping_preserves_existing_market_times(self):
         markets = {
             "known": MarketDatum("BTCUSDT", 100, 0, timestamp=NOW - 32),
@@ -113,19 +102,19 @@ class TestExchangeRegistry(unittest.TestCase):
         self.assertEqual(markets["zero"].timestamp, 0)
         self.assertEqual(markets["missing"].timestamp, NOW)
 
-    def test_only_requested_eleven_exchanges_remain(self):
+    def test_only_requested_ten_exchanges_remain(self):
         self.assertEqual(set(Settings().exchanges), EXCHANGES)
 
     def test_legacy_config_cannot_restore_removed_exchanges(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "exchanges.json"
             path.write_text(json.dumps({"nado": True, "grvt": True, "ondoperps": True, "backpack": True,
-                                        "binance": False, "bulk": False}))
+                                        "binance": False, "bulk": True}))
             cfg = Settings(runtime_config_file=str(path))
             cfg.load_runtime_config()
             self.assertEqual(set(cfg.exchanges), EXCHANGES)
             self.assertFalse(cfg.binance.enabled)
-            self.assertFalse(cfg.bulk.enabled)
+            self.assertNotIn("bulk", set(cfg.exchanges))
             self.assertTrue(cfg.arcus.enabled)
             self.assertTrue(cfg.risex.enabled)
 
@@ -148,7 +137,7 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
         return collector
 
     async def test_live_fields_normalize_without_multiplying_hourly_funding(self):
-        for key, symbol in [("arcus", "BTCUSDT"), ("bulk", "SOLUSDT"), ("risex", "HYPEUSDT")]:
+        for key, symbol in [("arcus", "BTCUSDT"), ("risex", "HYPEUSDT")]:
             with self.subTest(exchange=key):
                 collector = self.collector(key)
                 markets = await collector.fetch_markets([symbol])
@@ -162,7 +151,7 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((item.best_bid, item.best_ask), (99, 101))
 
     async def test_slow_batch_cannot_refresh_early_market_timestamps(self):
-        for key, symbol in [("arcus", "BTCUSDT"), ("bulk", "SOLUSDT"), ("risex", "HYPEUSDT")]:
+        for key, symbol in [("arcus", "BTCUSDT"), ("risex", "HYPEUSDT")]:
             with self.subTest(exchange=key):
                 with patch("time.time", return_value=NOW) as clock:
                     collector = self.collector(key)
@@ -204,102 +193,19 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
                 stamp_market_timestamps(markets, NOW + 32)
                 self.assertEqual(markets[symbol].timestamp, NOW)
 
-    async def test_bulk_preserves_ticker_source_time_after_book_request(self):
-        collector = self.collector("bulk")
-        collector._client.ticker["timestamp"] = int((NOW - 29) * 1e9)
-        markets = await collector.fetch_markets(["SOLUSDT"])
-        stamp_market_timestamps(markets, NOW + 2)
-        self.assertEqual(markets["SOLUSDT"].timestamp, NOW - 29)
-
-    async def test_bulk_stale_symbol_does_not_discard_healthy_markets(self):
-        for stale_field in ("ticker", "book"):
-            with self.subTest(stale_field=stale_field):
-                collector = self.collector("bulk")
-                original_get = collector._client.get
-                stale = True
-
-                async def get(path, params=None):
-                    if path == "/api/v1/exchangeInfo":
-                        return Response([BULK_MARKET, {**BULK_MARKET, "symbol": "MON-USD", "baseAsset": "MON"}])
-                    if path == "/api/v1/ticker/MON-USD":
-                        return Response({**BULK_TICKER, "symbol": "MON-USD",
-                                         "timestamp": int((NOW - (60 if stale and stale_field == "ticker" else 0)) * 1e9)})
-                    if path == "/api/v1/l2book" and params["coin"] == "MON-USD":
-                        response = await original_get(path, {**params, "coin": "SOL-USD"})
-                        response.payload.update(symbol="MON-USD", timestamp=int(
-                            (NOW - (5.632 if stale and stale_field == "book" else 0)) * 1e9))
-                        return response
-                    return await original_get(path, params)
-
-                with patch.object(collector._client, "get", side_effect=get):
-                    with self.assertLogs("collectors.bulk", level="WARNING") as logs:
-                        markets = await collector.fetch_markets([])
-                    self.assertEqual(set(markets), {"SOLUSDT"})
-                    self.assertEqual(markets["SOLUSDT"].timestamp, NOW)
-                    self.assertIn("MONUSDT", " ".join(logs.output))
-                    stale = False
-                    self.assertEqual(set(await collector.fetch_markets([])), {"SOLUSDT", "MONUSDT"})
-
-    async def test_bulk_missing_book_skips_only_that_market(self):
-        collector = self.collector("bulk")
-        original_get = collector._client.get
-
-        async def get(path, params=None):
-            if path == "/api/v1/exchangeInfo":
-                return Response([BULK_MARKET, {**BULK_MARKET, "symbol": "PUMP-USD", "baseAsset": "PUMP"}])
-            if path == "/api/v1/ticker/PUMP-USD":
-                return Response({**BULK_TICKER, "symbol": "PUMP-USD"})
-            if path == "/api/v1/l2book" and params["coin"] == "PUMP-USD":
-                return Response({}, status_code=404)
-            return await original_get(path, params)
-
-        with patch.object(collector._client, "get", side_effect=get):
-            with self.assertLogs("collectors.bulk", level="WARNING") as logs:
-                markets = await collector.fetch_markets([])
-            self.assertEqual(set(markets), {"SOLUSDT"})
-            self.assertIn("PUMPUSDT", " ".join(logs.output))
-            status = {}
-            replace_exchange_snapshot({}, status, key="bulk", data=markets, fetched_at=NOW, error=None)
-            self.assertEqual(status["bulk"]["state"], "fresh")
-            with self.assertRaises(HTTPError):
-                await collector.fetch_order_book("PUMPUSDT", 1)
-
-    async def test_bulk_book_server_error_still_fails_the_scan(self):
-        collector = self.collector("bulk")
-        original_get = collector._client.get
-
-        async def get(path, params=None):
-            if path == "/api/v1/l2book":
-                return Response({}, status_code=500)
-            return await original_get(path, params)
-
-        with patch.object(collector._client, "get", side_effect=get):
-            with self.assertRaises(HTTPError) as error:
-                await collector.fetch_markets(["SOLUSDT"])
-        self.assertEqual(error.exception.response.status_code, 500)
-
-    async def test_bulk_all_stale_markets_return_empty_without_reusing_old_data(self):
-        collector = self.collector("bulk")
-        self.assertIn("SOLUSDT", await collector.fetch_markets([]))
-        collector._client.book_time = NOW - 60
-        with self.assertLogs("collectors.bulk", level="WARNING"):
-            self.assertEqual(await collector.fetch_markets([]), {})
-        with self.assertRaisesRegex(ValueError, "stale order book"):
-            await collector.fetch_order_book("SOLUSDT", 1)
-
     async def test_zero_and_missing_funding_are_distinct(self):
-        for key, symbol, field in [("arcus", "BTCUSDT", "nextFundingRate"), ("bulk", "SOLUSDT", "fundingRate"),
-                                   ("risex", "HYPEUSDT", "current_funding_rate")]:
+        for key, symbol, field in [("arcus", "BTCUSDT", "nextFundingRate"),
+                                  ("risex", "HYPEUSDT", "current_funding_rate")]:
             with self.subTest(exchange=key):
                 collector = self.collector(key)
-                record = collector._client.ticker if key == "bulk" else collector._client.market
+                record = collector._client.market
                 record[field] = "0"
                 self.assertEqual((await collector.fetch_markets([symbol]))[symbol].funding_rate, 0)
                 record.pop(field)
                 self.assertIsNone((await collector.fetch_markets([symbol]))[symbol].funding_rate)
 
     async def test_inactive_and_unrequested_markets_do_not_fetch_books(self):
-        for key in ["arcus", "bulk", "risex"]:
+        for key in ["arcus", "risex"]:
             with self.subTest(exchange=key):
                 collector = self.collector(key)
                 self.assertEqual(await collector.fetch_markets(["NOTLISTEDUSDT"]), {})
@@ -311,7 +217,7 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(any("book" in path.lower() for path, _ in collector._client.calls))
 
     async def test_symbol_overrides_and_exclusions_apply_to_market_and_depth(self):
-        for key, native in [("arcus", "BTC-USD"), ("bulk", "SOL-USD"), ("risex", "HYPE/USDC")]:
+        for key, native in [("arcus", "BTC-USD"), ("risex", "HYPE/USDC")]:
             with self.subTest(exchange=key):
                 collector = self.collector(key)
                 collector.settings.symbol_overrides[native] = "CUSTOMUSDT"
@@ -322,17 +228,17 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
 
     async def test_books_support_manual_entry_including_before_first_scan(self):
         collectors = {}
-        for key, symbol in [("arcus", "BTCUSDT"), ("bulk", "SOLUSDT"), ("risex", "HYPEUSDT")]:
+        for key, symbol in [("arcus", "BTCUSDT"), ("risex", "HYPEUSDT")]:
             collector = self.collector(key)
             book = await collector.fetch_order_book(symbol, 100)
             self.assertEqual(book["bids"], [[99, 20], [98, 10]])
             self.assertEqual(book["asks"], [[101, 20], [102, 10]])
             collectors[key] = collector
-        self.assertTrue(entry_check_supported("arcus", "bulk", collectors))
-        self.assertTrue(entry_check_supported("bulk", "risex", collectors))
+        self.assertTrue(entry_check_supported("arcus", "risex", collectors))
+        self.assertTrue(entry_check_supported("risex", "arcus", collectors))
 
     async def test_empty_book_is_not_synthesized_from_mark_price(self):
-        for key, symbol in [("arcus", "BTCUSDT"), ("bulk", "SOLUSDT"), ("risex", "HYPEUSDT")]:
+        for key, symbol in [("arcus", "BTCUSDT"), ("risex", "HYPEUSDT")]:
             collector = self.collector(key)
             collector._client.empty_book = True
             book = await collector.fetch_order_book(symbol, 100)
@@ -343,21 +249,21 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(market.best_ask)
 
     async def test_upstream_book_failure_propagates(self):
-        for key in ["arcus", "bulk", "risex"]:
+        for key in ["arcus", "risex"]:
             collector = self.collector(key)
             collector._client.fail_book = True
             with self.assertRaisesRegex(RuntimeError, f"{key} order book unavailable"):
                 await collector.fetch_markets([])
 
     async def test_invalid_book_numbers_fail_instead_of_becoming_opportunities(self):
-        for key, symbol in [("arcus", "BTCUSDT"), ("bulk", "SOLUSDT"), ("risex", "HYPEUSDT")]:
+        for key, symbol in [("arcus", "BTCUSDT"), ("risex", "HYPEUSDT")]:
             collector = self.collector(key)
             collector._client.invalid_book = True
             with self.assertRaises(ValueError):
                 await collector.fetch_order_book(symbol, 100)
 
     async def test_source_book_timestamps_are_not_treated_as_fresh_receipt_times(self):
-        for key, symbol in [("arcus", "BTCUSDT"), ("bulk", "SOLUSDT")]:
+        for key, symbol in [("arcus", "BTCUSDT")]:
             collector = self.collector(key)
             collector._client.book_time = NOW - 60
             with self.assertRaisesRegex(ValueError, "[Ss]tale"):
@@ -366,7 +272,7 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
     async def test_manual_requote_rejects_source_quote_expiring_during_other_leg(self):
         import api
 
-        for key, symbol in [("arcus", "BTCUSDT"), ("bulk", "SOLUSDT")]:
+        for key, symbol in [("arcus", "BTCUSDT")]:
             with self.subTest(exchange=key), patch("time.time", return_value=NOW) as clock:
                 collector = self.collector(key)
                 collector._client.book_time = NOW - 1.9
@@ -387,7 +293,7 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
     async def test_manual_requote_checks_skew_between_source_times(self):
         import api
 
-        for key, symbol in [("arcus", "BTCUSDT"), ("bulk", "SOLUSDT")]:
+        for key, symbol in [("arcus", "BTCUSDT")]:
             with self.subTest(exchange=key):
                 collector = self.collector(key)
                 collector._client.book_time = NOW - 1.5
@@ -403,7 +309,7 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
     async def test_dashboard_expires_cached_routes_using_market_times(self):
         import api
 
-        for key, symbol in [("arcus", "BTCUSDT"), ("bulk", "SOLUSDT"), ("risex", "HYPEUSDT")]:
+        for key, symbol in [("arcus", "BTCUSDT"), ("risex", "HYPEUSDT")]:
             for partial in (False, True):
                 with self.subTest(exchange=key, partial=partial), patch("time.time", return_value=NOW) as clock:
                     markets = await self.collector(key).fetch_markets([symbol])
@@ -442,12 +348,6 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(snapshot["markets"][symbol][key])
                         self.assertEqual(len(snapshot["opportunities"]), 4 if partial else 2)
 
-    async def test_stale_bulk_ticker_is_rejected(self):
-        collector = self.collector("bulk")
-        collector._client.ticker["timestamp"] = int((NOW - 300) * 1e9)
-        self.assertEqual(await collector.fetch_markets([]), {})
-        with self.assertRaisesRegex(ValueError, "[Ss]tale"):
-            await collector._market("SOLUSDT", "SOL-USD")
 
     async def test_risex_interval_comes_from_nanoseconds(self):
         collector = self.collector("risex")
@@ -467,7 +367,7 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await collector.fetch_markets([]), {})
 
     async def test_collector_close_releases_its_own_pooled_session(self):
-        for key in ("arcus", "bulk", "risex"):
+        for key in ("arcus", "risex"):
             collector = self.collector(key)
             self.assertTrue(callable(getattr(collector, "aclose", None)))
             with patch("collectors.session_pool.session_pool.close_session", new_callable=AsyncMock) as close:
@@ -478,7 +378,7 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
         import api
 
         cfg = Settings()
-        for key, symbol in (("arcus", "BTCUSDT"), ("bulk", "SOLUSDT"), ("risex", "HYPEUSDT")):
+        for key, symbol in (("arcus", "BTCUSDT"), ("risex", "HYPEUSDT")):
             with self.subTest(exchange=key):
                 collector = self.collector(key)
                 markets = await collector.fetch_markets([symbol])
@@ -509,7 +409,7 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
                     post.assert_awaited_once()
                     self.assertIn(key, post.await_args.args[1].lower())
 
-    async def test_api_lists_only_the_eight_supported_exchanges(self):
+    async def test_api_lists_only_the_ten_supported_exchanges(self):
         import httpx
         import api
 
