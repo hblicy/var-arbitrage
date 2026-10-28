@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { positionViewModel, priceAgeLabel } from './positionViewModel.mjs';
 
 const AUTH_KEY = 'pos_auth_v2'; // upgraded key
-const REFRESH_MS = 30000;
+const REFRESH_MS = 5000;
 const POSITION_EXCHANGES = ['variational', 'binance', 'hyperliquid', 'aster', 'lighter', 'arcus', 'risex', 'txflow', 'qfex', 'popdex'];
 
 const PositionsModal = ({ isOpen, onClose }) => {
@@ -14,6 +15,11 @@ const PositionsModal = ({ isOpen, onClose }) => {
     const [loading, setLoading] = useState(false);
     const refreshTimer = useRef(null);
     const autoLoginAttempted = useRef(false);
+    const positionRequest = useRef(null);
+    const [positionError, setPositionError] = useState('');
+    const [refreshing, setRefreshing] = useState(false);
+    const [positionsReceivedAt, setPositionsReceivedAt] = useState(0);
+    const [clock, setClock] = useState(0);
 
     // ── Tab state ──────────────────────────────────────────────
     const [tab, setTab] = useState('my-positions'); // 'my-positions' | 'all-positions' | 'users'
@@ -41,6 +47,10 @@ const PositionsModal = ({ isOpen, onClose }) => {
     const getAuthHeader = useCallback((u, p) => 'Basic ' + btoa((u || username) + ':' + (p || password)), [username, password]);
 
     const handleLogout = useCallback(() => {
+        positionRequest.current?.controller.abort();
+        positionRequest.current = null;
+        setRefreshing(false);
+        setPositionError('');
         localStorage.removeItem(AUTH_KEY);
         setIsLoggedIn(false);
         setCurrentUser(null);
@@ -54,11 +64,21 @@ const PositionsModal = ({ isOpen, onClose }) => {
     const loadPositions = useCallback(async (options = {}) => {
         const requestUser = options.user || currentUser;
         if (!requestUser) return;
+        const requestTab = options.tab || tab;
+        const requestFilterOwner = options.filterOwner ?? filterOwner;
+        const requestKey = `${requestUser.id}:${requestTab}:${requestFilterOwner}`;
+        if (positionRequest.current?.key === requestKey && !options.force) return;
+        positionRequest.current?.controller.abort();
+        const request = { key: requestKey, controller: new AbortController(), timedOut: false, startedAt: performance.now() };
+        positionRequest.current = request;
+        setRefreshing(true);
+        const timeout = setTimeout(() => {
+            request.timedOut = true;
+            request.controller.abort();
+        }, 10000);
         try {
             const params = new URLSearchParams();
             const requestIsAdmin = requestUser.role === 'admin';
-            const requestTab = options.tab || tab;
-            const requestFilterOwner = options.filterOwner ?? filterOwner;
             const authHeader = options.authHeader || getAuthHeader();
 
             if (requestIsAdmin && requestTab === 'all-positions' && requestFilterOwner) {
@@ -69,11 +89,30 @@ const PositionsModal = ({ isOpen, onClose }) => {
             }
 
             const url = '/api/positions/pnl' + (params.toString() ? '?' + params : '');
-            const res = await fetch(url, { headers: { 'Authorization': authHeader } });
+            const res = await fetch(url, { headers: { 'Authorization': authHeader }, signal: request.controller.signal });
+            if (positionRequest.current !== request) return;
             if (res.status === 401) { handleLogout(); return; }
-            if (res.ok) setPositions(await res.json());
-        } catch {
-            setError('加载持仓失败');
+            if (!res.ok) throw new Error(`加载持仓失败 (HTTP ${res.status})`);
+            const data = await res.json();
+            if (positionRequest.current !== request || request.controller.signal.aborted) return;
+            setPositions(data);
+            const receivedAt = performance.now();
+            setPositionsReceivedAt(request.startedAt);
+            setClock(receivedAt);
+            setPositionError('');
+        } catch (err) {
+            if (positionRequest.current !== request) return;
+            if (request.timedOut) setPositionError('持仓刷新超时，保留上次快照；过期报价将自动停用。');
+            else if (err.name !== 'AbortError') {
+                console.error('Position price refresh failed', err);
+                setPositionError(err.message || '加载持仓失败');
+            }
+        } finally {
+            clearTimeout(timeout);
+            if (positionRequest.current === request) {
+                positionRequest.current = null;
+                setRefreshing(false);
+            }
         }
     }, [currentUser, tab, filterOwner, getAuthHeader, handleLogout]);
 
@@ -161,18 +200,24 @@ const PositionsModal = ({ isOpen, onClose }) => {
     // ── Auto-refresh ───────────────────────────────────────────
     useEffect(() => {
         if (!isOpen || !isLoggedIn) return;
-        refreshTimer.current = setInterval(() => {
-            loadPositions();
-            loadReversals();
-        }, REFRESH_MS);
-        return () => clearInterval(refreshTimer.current);
+        setClock(performance.now());
+        loadPositions();
+        loadReversals();
+        refreshTimer.current = setInterval(loadPositions, REFRESH_MS);
+        const reversalTimer = setInterval(loadReversals, 30000);
+        const ageTimer = setInterval(() => setClock(performance.now()), 1000);
+        return () => {
+            clearInterval(refreshTimer.current);
+            clearInterval(reversalTimer);
+            clearInterval(ageTimer);
+            positionRequest.current?.controller.abort();
+            positionRequest.current = null;
+        };
     }, [isOpen, isLoggedIn, loadPositions, loadReversals]);
 
     useEffect(() => {
-        if (isLoggedIn && (tab === 'my-positions' || tab === 'all-positions')) loadPositions();
-        if (isLoggedIn && (tab === 'my-positions' || tab === 'all-positions')) loadReversals();
         if (isLoggedIn && isAdmin && tab === 'users') loadAllUsers();
-    }, [isLoggedIn, isAdmin, tab, filterOwner, loadPositions, loadReversals, loadAllUsers]);
+    }, [isLoggedIn, isAdmin, tab, loadAllUsers]);
 
     // ── Position actions ───────────────────────────────────────
     const handleAdd = async (e) => {
@@ -278,19 +323,16 @@ const PositionsModal = ({ isOpen, onClose }) => {
     const fmtPrice = (v) => { if (!v) return '-'; return v >= 100 ? `$${v.toFixed(2)}` : `$${v.toFixed(4)}`; };
 
     const healthBadge = (status) => {
-        if (!status || status === 'healthy') return <span className="health-badge healthy">正常</span>;
+        if (!status || status === 'healthy') return <span className="health-badge healthy">策略正常</span>;
         if (status === 'watch') return <span className="health-badge watch">观察</span>;
         if (status === 'reversal') return <span className="health-badge reversal">反转</span>;
         return null;
     };
 
     // ── Compute totals ──────────────────────────────────────────
-    const entries = Object.entries(positions);
-    const totalCombined = entries.reduce((s, [, d]) => s + (d.pnl?.total_pnl || 0), 0);
-    const totalNotional = entries.reduce((s, [, d]) => s + (d.pnl?.notional || 0), 0);
-    const totalFunding = entries.reduce((s, [, d]) => s + (d.pnl?.funding_income || 0), 0);
-    const totalFees = entries.reduce((s, [, d]) => s + (d.pnl?.total_fees || 0), 0);
-    const totalMtm = entries.reduce((s, [, d]) => s + (d.pnl?.mtm_pnl || 0), 0);
+    const { entries, totals } = positionViewModel(positions, (clock - positionsReceivedAt) / 1000);
+    const { total_pnl: totalCombined, notional: totalNotional, funding_income: totalFunding,
+        total_fees: totalFees, mtm_pnl: totalMtm } = totals;
 
     // ── Owner map for display ──────────────────────────────────
     const ownerMap = Object.fromEntries(allUsers.map(u => [u.id, u]));
@@ -337,13 +379,14 @@ const PositionsModal = ({ isOpen, onClose }) => {
                                     )}
                                 </div>
                                 <div style={{ display: 'flex', gap: '8px' }}>
-                                    <button className="refresh-btn" onClick={loadPositions} disabled={loading}>🔄 刷新</button>
+                                    <button className="refresh-btn" onClick={() => loadPositions({ force: true })} disabled={loading}>🔄 {refreshing ? '刷新中...' : '刷新'}</button>
                                     <button className="logout-btn" onClick={handleLogout}>退出</button>
                                 </div>
                             </div>
 
                             {/* ── Error banner ── */}
                             {error && <div className="error-msg" style={{ marginBottom: '12px' }}>{error}<button style={{ marginLeft: '12px', background: 'none', border: 'none', color: 'inherit', cursor: 'pointer' }} onClick={() => setError('')}>×</button></div>}
+                            {positionError && <div className="error-msg" role="alert">{positionError}</div>}
 
                             {/* ══════════════════════════════════════════════
                                 Tab: 我的持仓
@@ -420,8 +463,10 @@ const PositionsModal = ({ isOpen, onClose }) => {
                                                                     <td className="num-col">${(p.notional || 0).toFixed(0)}</td>
                                                                     <td className="num-col price-cell">
                                                                         <span className="price-long">{fmtPrice(data.current_price_long)}</span>
+                                                                        <span className={`price-age ${data.price_health.long.status}`} title="报价：交易所时间；采集：本机收到行情的时间；缓存估算：HTTP 缓存年龄，不保证源价格实时。">多 · {priceAgeLabel(data.price_health.long)}</span>
                                                                         <span className="price-sep">/</span>
                                                                         <span className="price-short">{fmtPrice(data.current_price_short)}</span>
+                                                                        <span className={`price-age ${data.price_health.short.status}`} title="报价：交易所时间；采集：本机收到行情的时间；缓存估算：HTTP 缓存年龄，不保证源价格实时。">空 · {priceAgeLabel(data.price_health.short)}</span>
                                                                     </td>
                                                                     <td className={`num-col ${pnlClass(p.funding_income)}`}>{fmtUsd(p.funding_income)}</td>
                                                                     <td className="num-col pnl-negative">-${(p.total_fees || 0).toFixed(2)}</td>
@@ -429,7 +474,7 @@ const PositionsModal = ({ isOpen, onClose }) => {
                                                                     <td className={`num-col ${pnlClass(p.mtm_pnl)}`}>{fmtUsd(p.mtm_pnl)}</td>
                                                                     <td className={`num-col font-bold ${pnlClass(p.total_pnl)}`}>{fmtUsd(p.total_pnl)}</td>
                                                                     <td className="num-col">{fmtDays(p.hours_held)}</td>
-                                                                    <td>{healthBadge(data.health_status)}</td>
+                                                                    <td>{healthBadge(data.health_status)}{!data.prices_available && <span className="price-unavailable">价格不可用</span>}</td>
                                                                     <td><button className="delete-btn" onClick={() => handleDelete(pId)}>平仓</button></td>
                                                                 </tr>
                                                             );
@@ -466,7 +511,7 @@ const PositionsModal = ({ isOpen, onClose }) => {
                                             <option value="">全部用户</option>
                                             {allUsers.map(u => <option key={u.id} value={u.id}>{u.display_name || u.username}</option>)}
                                         </select>
-                                        <button className="refresh-btn" style={{ marginLeft: '8px' }} onClick={loadPositions}>🔄</button>
+                                        <button className="refresh-btn" style={{ marginLeft: '8px' }} onClick={() => loadPositions({ force: true })}>🔄</button>
                                     </div>
                                     <div className="list-container pnl-table-scroll" style={{ marginTop: '12px' }}>
                                         {entries.length === 0 ? (
@@ -503,7 +548,7 @@ const PositionsModal = ({ isOpen, onClose }) => {
                                                                 </td>
                                                                 <td className={`num-col font-bold ${pnlClass(p.total_pnl)}`}>{fmtUsd(p.total_pnl)}</td>
                                                                 <td className="num-col">{fmtDays(p.hours_held)}</td>
-                                                                <td>{healthBadge(data.health_status)}</td>
+                                                                <td>{healthBadge(data.health_status)}{!data.prices_available && <span className="price-unavailable">价格不可用</span>}</td>
                                                                 <td><button className="delete-btn" onClick={() => handleDelete(pId)}>平仓</button></td>
                                                             </tr>
                                                         );

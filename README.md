@@ -78,6 +78,18 @@ Bulk 遗留持仓的手续费估算继续使用原 `BULK_TAKER_FEE_BPS` 覆盖�
 
 接口：`GET /api/funding` 获取策略快照；`GET /api/funding/history?symbol=BTCUSDT&long_exchange=arcus&short_exchange=binance&hours=4` 查询历史与事件；`POST /api/funding/check` 接受同名路线参数及 `hours`，执行按需分档复核。接口只读行情，不产生交易。
 
+### 持仓价格与时效
+
+- 持仓窗口打开后立即取数，之后每 5 秒刷新；每秒递增价格年龄。超时、HTTP 错误和断网会显示提示，保留的快照仍按原报价时间过期。切换持仓筛选或手动刷新会取消旧请求，关闭窗口会停止价格轮询。
+- 后端各交易所独立采集、完成后立即发布。单个交易所慢请求或策略复核不会阻止其他交易所继续更新持仓报价；请求耗时写入现有日志。每轮记账、分析、策略监控和退出检查使用同一份行情快照；旧分析结果按自身报价时间过期，后续采集不会替旧结果续期。
+- Variational 普通加密货币永续持仓优先使用官方网页的公开 `/prices` WebSocket，仅订阅当前未平仓持仓的币种，不需要登录或私钥。使用 `pricing.price` 及其源 `timestamp`，不是可成交盘口复核。订阅格式依据 2026-10-28 的[官方应用脚本](https://omni.variational.io/_app/immutable/chunks/CW_TCkmp.js)核实，属于未版本化的网页协议，可能变化。
+- WebSocket 的线协议使用 `funding_interval_s=3600`；这不表示实际资金费每小时结算。资金费率和真实结算周期仍读取原 REST 元数据，抓取回退不会改写已确认的订阅映射。非普通加密货币永续或缺少订阅映射的市场继续显示原行情来源及其时效。
+- 尚未收到实时流时，Variational REST 价格仅按 HTTP `Age` / `Date` 估算缓存年龄，并标注“缓存估算”；这不是交易所源报价时间。缺少有效缓存元数据时显示“时效未知”。已收到实时流后，流断开或价格过期不会静默退回旧缓存；连接按退避重试，重复或乱序消息不会刷新报价时间。
+- 持仓接口新增 `price_health.long/short`（状态、年龄、源时间、采集时间、时间来源）、`price_max_age_seconds` 和 `prices_available`。价格过期、缺失或时效未知时，对应 `current_price_*` 返回 `null`，`pnl.mtm_pnl` 和 `pnl.total_pnl` 返回 `null`；已累计资金费仍显示。前端有任一持仓估值不可用时，合计浮盈和合计总盈亏也显示不可用，不把缺失值当作零。
+- `MARKET_STALE_SECONDS` 继续控制报价过期门槛，默认 30 秒。“策略正常”与价格状态分开显示。不新增数据库字段或依赖；之后部署时需重启后端并重新构建前端。
+
+官方[只读 REST API](https://docs.variational.io/technical-documentation/api)仍是统计接口，其买卖报价可能缓存最多 600 秒，不能直接作为秒级价格源。
+
 ### 原有监控能力
 
 1. **多维度价差计算**：不仅仅看最新价，更结合最佳买卖价 (Bid/Ask) 以及各所设定的单边吃单手续费 (Taker Fee) 计算净盈亏空间 (Net Spread)。

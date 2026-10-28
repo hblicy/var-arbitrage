@@ -122,6 +122,7 @@ class BinanceCollector(MarketCollector):
                 best_bid=best_bid,
                 best_ask=best_ask,
                 next_funding_time=next_funding_map.get(raw_sym),
+                timestamp=ticker_time / 1000 if ticker_time > 0 else None,
             )
         
         logger.info(f"Fetched {len(markets)} markets from Binance.")

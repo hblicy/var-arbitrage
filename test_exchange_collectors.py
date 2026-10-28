@@ -192,6 +192,7 @@ class TestNewCollectors(unittest.IsolatedAsyncioTestCase):
                     markets = await collector.fetch_markets([symbol])
                 stamp_market_timestamps(markets, NOW + 32)
                 self.assertEqual(markets[symbol].timestamp, NOW)
+                self.assertEqual(markets[symbol].timestamp_source, 'received')
 
     async def test_zero_and_missing_funding_are_distinct(self):
         for key, symbol, field in [("arcus", "BTCUSDT", "nextFundingRate"),

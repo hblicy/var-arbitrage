@@ -62,6 +62,7 @@ class RisexCollector(MarketCollector):
         # Prices and funding precede the book requests, so include that wait in their age.
         for market in markets:
             market.timestamp = collected_at
+            market.timestamp_source = "received"
         logger.info("Fetched %d markets from RISEx", len(markets))
         return {market.symbol: market for market in markets}
 
