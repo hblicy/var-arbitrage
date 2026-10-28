@@ -20,6 +20,8 @@ class MarketDatum:
     next_funding_time_source: str = "exchange"
     quote_currency: str = "USD"
     funding_hours: Optional[dict] = None
+    fetched_at: Optional[float] = None
+    timestamp_source: Optional[str] = None
 
 
 @dataclass

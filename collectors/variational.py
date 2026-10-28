@@ -6,13 +6,19 @@ HTML scraping when ``VARIATIONAL_SCRAPE_MODE=scrape``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import re
 import time
+import threading
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Dict, Iterable, List, Optional
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests
+import websocket
 
 from collectors.base import MarketCollector
 from config import ExchangeSettings
@@ -27,6 +33,9 @@ class VariationalCollector(MarketCollector):
         self._session: requests.AsyncSession | None = None
         self._lock = asyncio.Lock()
         self._last_error_log_at: Dict[str, float] = {}
+        self._data_timestamp: float | None = None
+        self._fetched_at: float | None = None
+        self._price_instruments: Dict[str, dict] = {}
 
     async def _get_session(self) -> requests.AsyncSession:
         async with self._lock:
@@ -55,6 +64,8 @@ class VariationalCollector(MarketCollector):
 
     async def fetch_markets(self, symbols: Iterable[str]) -> Dict[str, MarketDatum]:
         symbol_list = list(symbols)
+        self._data_timestamp = None
+        self._fetched_at = None
 
         session = await self._get_session()
         data_from_api = await self._try_api(session)
@@ -75,6 +86,7 @@ class VariationalCollector(MarketCollector):
             logger.warning("Variational returned no market data.")
             return markets
 
+        instruments = {}
         for item in data:
             raw_symbol = item.get(self.settings.price_endpoint.symbol_key)
             if not raw_symbol:
@@ -83,6 +95,13 @@ class VariationalCollector(MarketCollector):
             normalised_symbol = self._normalise_symbol(raw_symbol)
             if not normalised_symbol:
                 continue
+
+            if is_api and item.get("instrument_type", "perpetual_future") == "perpetual_future" and not item.get("dex_token_details"):
+                # The web app's wire interval is 3600; funding keeps the REST interval.
+                instruments[normalised_symbol] = {
+                    "underlying": raw_symbol, "instrument_type": "perpetual_future",
+                    "settlement_asset": "USDC", "funding_interval_s": 3600,
+                }
 
             if symbol_list and normalised_symbol not in symbol_list:
                 continue
@@ -112,9 +131,108 @@ class VariationalCollector(MarketCollector):
                     native_interval_hours=native_interval,
                     best_bid=_safe_float(item.get("best_bid")),
                     best_ask=_safe_float(item.get("best_ask")),
+                    timestamp=self._data_timestamp if is_api else None,
+                    fetched_at=self._fetched_at or time.time(),
+                    timestamp_source="http_cache" if is_api and self._data_timestamp is not None else "unknown",
                 )
 
+        if is_api:
+            self._price_instruments = instruments
         return markets
+
+    def _apply_price_message(self, payload, channels, quotes) -> bool:
+        if not isinstance(payload, dict) or not isinstance(payload.get("channel"), str) or payload["channel"] not in channels:
+            return False
+        symbol = channels[payload["channel"]]
+        try:
+            pricing = payload["pricing"]
+            price = float(pricing["price"])
+            source_time = datetime.fromisoformat(pricing["timestamp"].replace("Z", "+00:00"))
+            quoted_at, received_at = source_time.timestamp(), time.time()
+            if source_time.tzinfo is None or not math.isfinite(price) or price <= 0 or quoted_at > received_at:
+                raise ValueError("invalid price or source timestamp")
+        except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
+            logger.warning("Variational price stream rejected invalid quote for %s.", symbol)
+            return False
+        previous = quotes.get(symbol)
+        if previous is not None and quoted_at <= previous.timestamp:
+            return False
+        quotes[symbol] = MarketDatum(symbol, price, None, timestamp=quoted_at,
+            exchange=self.settings.name, fetched_at=received_at, timestamp_source="exchange_ws")
+        return True
+
+    def _run_price_stream(self, held_symbols, quotes, stop):
+        delay = 1
+        while not stop.is_set():
+            held = set(held_symbols())
+            instruments = self._price_instruments
+            desired = {s: instruments[s] for s in held if s in instruments}
+            for symbol in set(quotes) - held:
+                quotes.pop(symbol, None)
+            if not desired:
+                stop.wait(2)
+                continue
+            socket = None
+            try:
+                socket = websocket.create_connection(
+                    "wss://omni-ws-server.prod.ap-northeast-1.variational.io/prices",
+                    timeout=min(5, self.settings.timeout), origin="https://omni.variational.io",
+                )
+                socket.settimeout(1)
+                subscribed, channels, refreshed_at = {}, {}, 0
+                last_received_at = time.monotonic()
+                logger.info("Variational public position price stream connected.")
+                while not stop.is_set():
+                    if time.monotonic()-refreshed_at >= 2:
+                        held = set(held_symbols())
+                        instruments = self._price_instruments
+                        desired = {s: instruments[s] for s in held if s in instruments}
+                        added, removed = set(desired)-set(subscribed), set(subscribed)-set(desired)
+                        if added:
+                            socket.send(json.dumps({"action": "subscribe", "instruments": [desired[s] for s in sorted(added)]}))
+                        if removed:
+                            socket.send(json.dumps({"action": "unsubscribe", "instruments": [subscribed[s] for s in sorted(removed)]}))
+                            for symbol in removed:
+                                quotes.pop(symbol, None)
+                        subscribed = desired
+                        channels = {f"instrument_price:P-{meta['underlying']}-USDC-3600": s for s, meta in subscribed.items()}
+                        refreshed_at = time.monotonic()
+                        if not subscribed:
+                            break
+                    try:
+                        raw = socket.recv()
+                    except websocket.WebSocketTimeoutException:
+                        if time.monotonic()-last_received_at >= self.settings.timeout:
+                            raise TimeoutError("Variational price stream idle timeout")
+                        continue
+                    if not raw:
+                        raise websocket.WebSocketConnectionClosedException("price stream closed")
+                    last_received_at = time.monotonic()
+                    try:
+                        payload = json.loads(raw)
+                    except json.JSONDecodeError:
+                        logger.warning("Variational price stream sent malformed JSON.")
+                        continue
+                    if isinstance(payload, dict) and payload.get("type") == "error":
+                        raise websocket.WebSocketException("price subscription rejected")
+                    if self._apply_price_message(payload, channels, quotes):
+                        delay = 1
+            except (websocket.WebSocketException, OSError, TimeoutError) as exc:
+                logger.warning("Variational price stream disconnected (%s); retry in %ss.", type(exc).__name__, delay)
+            finally:
+                if socket is not None:
+                    socket.close(timeout=1)
+            stop.wait(delay)
+            delay = min(30, delay*2)
+
+    async def stream_position_prices(self, held_symbols, quotes) -> None:
+        stop = threading.Event()
+        worker = asyncio.create_task(asyncio.to_thread(self._run_price_stream, held_symbols, quotes, stop))
+        try:
+            await asyncio.shield(worker)
+        finally:
+            stop.set()
+            await worker
 
     async def _try_api(self, session: requests.AsyncSession) -> Optional[list]:
         endpoint = self.settings.price_endpoint
@@ -126,10 +244,22 @@ class VariationalCollector(MarketCollector):
             )
             response.raise_for_status()
             payload = response.json()
+            self._fetched_at = time.time()
         except Exception as exc:
             self._record_fetch_error("API", exc)
             await self._reset_session()
             return None
+
+        headers = getattr(response, "headers", {})
+        age = _safe_float(headers.get("Age"))
+        if age is not None and math.isfinite(age) and age >= 0:
+            if headers.get("Date"):
+                try:
+                    age = max(age, self._fetched_at - parsedate_to_datetime(headers["Date"]).timestamp())
+                except (TypeError, ValueError, OverflowError):
+                    logger.warning("Variational returned an invalid HTTP Date header.")
+            # HTTP cache age is only an estimate, never an exchange event timestamp.
+            self._data_timestamp = self._fetched_at - age
 
         data = payload
         try:

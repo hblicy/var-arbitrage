@@ -22,7 +22,7 @@ from collectors.binance import BinanceCollector
 from analyzer import analyse_markets
 from notifier import WeChatNotifier, select_binance_variational_alerts
 from entry_check import annotate_entry_check_support, entry_check_supported as has_entry_check_support, evaluate_entry_quote
-from market_state import dashboard_snapshot, replace_exchange_snapshot
+from market_state import dashboard_snapshot, market_price_health, replace_exchange_snapshot
 from funding_monitor import FundingMonitor, route_key
 from position_tracker import (
     add_position, remove_position,
@@ -316,16 +316,19 @@ def entry_check_supported(
 
 # Global collectors registry
 collectors_hub: Dict[str, Any] = {}
+live_position_prices: Dict[str, Any] = {}
 # Global notifier (singleton to persist _last_sent state)
 notifier: WeChatNotifier = None
 update_task: asyncio.Task | None = None
 funding_monitor: FundingMonitor | None = None
 
-async def perform_analysis():
+async def perform_analysis(exchanges_data=None):
     """Analyze current raw data from ALL exchanges (multi-user: frontend filters locally)."""
-    exchanges_data = latest_data["raw_exchanges_data"]
+    if exchanges_data is None:
+        exchanges_data = dict(latest_data["raw_exchanges_data"])
     
     if not exchanges_data:
+        latest_data["analysis_exchanges_data"] = exchanges_data
         latest_data["opportunities"] = []
         latest_data["reasons"] = {}
         latest_data["markets"] = {}
@@ -352,6 +355,7 @@ async def perform_analysis():
         ]
 
     if not symbols_to_analyze:
+        latest_data["analysis_exchanges_data"] = exchanges_data
         latest_data["opportunities"] = []
         latest_data["markets"] = {}
         latest_data["reasons"] = {}
@@ -406,6 +410,7 @@ async def perform_analysis():
     opp_display.sort(key=lambda x: x["total_apr"] if x["total_apr"] is not None else float('-inf'), reverse=True)
         
     # Update latest_data
+    latest_data["analysis_exchanges_data"] = exchanges_data
     latest_data["markets"] = markets_display
     latest_data["opportunities"] = opp_display
     latest_data["reasons"] = reasons
@@ -417,86 +422,88 @@ async def perform_analysis():
     return opportunities
 
 
-async def update_data_loop():
-    """Background task to fetch data and find opportunities."""
-    from datetime import datetime
-    while True:
-        interval = settings.schedule.interval_seconds
-        start_time = time.time()
-        try:
-            # --- Batch Processing Optimization ---
-            # Use asyncio.gather for parallel fetching while tracking health per collector
-            async def fetch_with_health_tracking(key: str, collector):
-                try:
-                    res = await collector.fetch_markets(settings.tracked_symbols)
-                    collector.last_fetch_time = time.time()
-                    collector.last_error = None
-                    return key, res or {}, None
-                except Exception as e:
-                    collector.last_error = str(e)
-                    logger.error(f"Exchange {key} fetch error: {e}")
-                    return key, {}, str(e)
-
-            all_keys = list(collectors_hub.keys())
-            fetch_tasks = [
-                fetch_with_health_tracking(key, collectors_hub[key])
-                for key in all_keys
-            ]
-            results = await asyncio.gather(*fetch_tasks)
-            
-            for key, data, error in results:
-                replace_exchange_snapshot(
-                    latest_data["raw_exchanges_data"],
-                    latest_data["exchange_status"],
-                    key=key,
-                    data=data,
-                    fetched_at=time.time(),
-                    error=error,
-                )
-                logger.info(
-                    "Exchange %s state=%s markets=%d.",
-                    key,
-                    latest_data["exchange_status"][key]["state"],
-                    len(data),
-                )
-            
-            # :55 快照 — 结算前 5 分钟内锁定当前费率
-            update_pre_settlement_rates(latest_data["raw_exchanges_data"])
-            # :01 结算 — 结算后 5 分钟内用快照费率记账
-            accumulate_funding(latest_data["raw_exchanges_data"])
-            
-            # Trigger analysis and update state (analyze ALL data)
-            opportunities = await perform_analysis()
-            
-            raw_alerts = select_binance_variational_alerts(opportunities, settings.thresholds)
-            if raw_alerts:
-                await notifier.send(raw_alerts)
-
-            if funding_monitor is not None:
-                await funding_monitor.process(opportunities, latest_data["raw_exchanges_data"], collectors_hub,
-                                              on_triggered=notifier.send)
-            
-            # Check for position exit signals
+async def _collect_exchange_loop(key: str, collector, first_attempt: asyncio.Event):
+    try:
+        while True:
+            started = time.monotonic()
+            error = None
             try:
-                exit_signals = check_exit_signals(latest_data["raw_exchanges_data"], settings)
-                if exit_signals:
-                    await notifier.send_exit_alerts(exit_signals)
-            except Exception as e:
-                logger.error(f"Error checking exit signals: {e}")
+                data = await collector.fetch_markets(settings.tracked_symbols) or {}
+                collector.last_fetch_time = time.time()
+                collector.last_error = None
+            except Exception as exc:
+                data, error = {}, str(exc)
+                collector.last_error = error
+                logger.exception("Exchange %s fetch failed.", key)
+            replace_exchange_snapshot(
+                latest_data["raw_exchanges_data"], latest_data["exchange_status"],
+                key=key, data=data, fetched_at=time.time(), error=error,
+            )
+            logger.info("Exchange %s state=%s markets=%d fetch_ms=%.0f.", key,
+                        latest_data["exchange_status"][key]["state"], len(data),
+                        (time.monotonic()-started)*1000)
+            first_attempt.set()
+            await asyncio.sleep(max(.1, settings.schedule.interval_seconds-(time.monotonic()-started)))
+    finally:
+        first_attempt.set()
 
-            logger.info(f"Update successful. Last update: {latest_data['last_update']}")
+
+async def update_data_loop():
+    """Publish each exchange independently; analyze the latest snapshots on schedule."""
+    first_attempt = asyncio.Event()
+    workers = [asyncio.create_task(_collect_exchange_loop(key, collector, first_attempt),
+                                  name=f"market-collector-{key}")
+               for key, collector in collectors_hub.items()]
+    variational = collectors_hub.get("variational")
+    if isinstance(variational, VariationalCollector):
+        def held_variational_symbols():
+            from db import get_positions
+            return {pos["symbol"] for pos in get_positions(status="open")
+                    if "variational" in (pos["long_exchange"], pos["short_exchange"])}
+        workers.append(asyncio.create_task(variational.stream_position_prices(
+            held_variational_symbols, live_position_prices), name="variational-position-prices"))
+    try:
+        if workers:
+            await first_attempt.wait()
+        while True:
+            for worker in workers:
+                if worker.done() and not worker.cancelled():
+                    worker.result()
+            interval = settings.schedule.interval_seconds
+            start_time = time.monotonic()
+            try:
+                cycle_data = dict(latest_data["raw_exchanges_data"])
+                # :55 快照 — 结算前 5 分钟内锁定当前费率
+                update_pre_settlement_rates(cycle_data)
+                # :01 结算 — 结算后 5 分钟内用快照费率记账
+                accumulate_funding(cycle_data)
             
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Update loop error: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+                opportunities = await perform_analysis(cycle_data)
             
-        # Calculate remaining sleep time to maintain a stable 30s interval
-        elapsed = time.time() - start_time
-        sleep_time = max(0.1, interval - elapsed)
-        await asyncio.sleep(sleep_time)
+                raw_alerts = select_binance_variational_alerts(opportunities, settings.thresholds)
+                if raw_alerts:
+                    await notifier.send(raw_alerts)
+
+                if funding_monitor is not None:
+                    await funding_monitor.process(opportunities, cycle_data, collectors_hub,
+                                                  on_triggered=notifier.send)
+            
+                try:
+                    exit_signals = check_exit_signals(cycle_data, settings)
+                    if exit_signals:
+                        await notifier.send_exit_alerts(exit_signals)
+                except Exception:
+                    logger.exception("Error checking exit signals.")
+                logger.info("Update successful. Last update: %s", latest_data['last_update'])
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Update loop error.")
+            await asyncio.sleep(max(.1, interval-(time.monotonic()-start_time)))
+    finally:
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
 @app.get("/api/data", response_model=DashboardData)
 async def get_dashboard_data():
@@ -843,6 +850,8 @@ async def get_positions_with_pnl(
 
     exchanges_data = latest_data.get("raw_exchanges_data", {})
     result = {}
+    now = time.time()
+    max_age = settings.schedule.market_stale_seconds
 
     for pos in positions_list:
         p_id = pos.get("id", "")
@@ -860,32 +869,37 @@ async def get_positions_with_pnl(
         pos_copy = pos.copy()
         long_market = exchanges_data.get(long_ex, {}).get(symbol)
         short_market = exchanges_data.get(short_ex, {}).get(symbol)
+        long_quote = live_position_prices.get(symbol, long_market) if long_ex == "variational" else long_market
+        short_quote = live_position_prices.get(symbol, short_market) if short_ex == "variational" else short_market
+        price_health = {
+            "long": market_price_health(long_quote, now=now, max_age=max_age),
+            "short": market_price_health(short_quote, now=now, max_age=max_age),
+        }
+        cur_price_long = long_quote.price if price_health["long"]["status"] == "fresh" else None
+        cur_price_short = short_quote.price if price_health["short"]["status"] == "fresh" else None
+        pos_copy["current_price_long"] = cur_price_long
+        pos_copy["current_price_short"] = cur_price_short
 
         if long_market:
             rate = getattr(long_market, 'funding_rate', None)
             interval = getattr(long_market, 'native_interval_hours', 8) or 8
             if rate is not None:
                 pos_copy["current_funding_long"] = rate * (8 / interval)
-            # Get current price for mark-to-market
-            pos_copy["current_price_long"] = getattr(long_market, 'price', None)
 
         if short_market:
             rate = getattr(short_market, 'funding_rate', None)
             interval = getattr(short_market, 'native_interval_hours', 8) or 8
             if rate is not None:
                 pos_copy["current_funding_short"] = rate * (8 / interval)
-            pos_copy["current_price_short"] = getattr(short_market, 'price', None)
 
         # Compute PnL
         pnl = estimate_position_pnl(pos_copy, long_taker, short_taker)
 
         # Calculate mark-to-market unrealized PnL (price change since entry)
-        mtm_pnl = 0.0
+        mtm_pnl = None
         entry_qty = pos.get("entry_qty", 0)
         entry_price_long = pos.get("entry_price_long", 0)
         entry_price_short = pos.get("entry_price_short", 0)
-        cur_price_long = pos_copy.get("current_price_long")
-        cur_price_short = pos_copy.get("current_price_short")
 
         if entry_qty and entry_price_long and entry_price_short and cur_price_long and cur_price_short:
             # Long leg: profit = (current - entry) * qty
@@ -898,17 +912,20 @@ async def get_positions_with_pnl(
         if pnl:
             enriched["pnl"] = pnl
             # Add combined PnL (funding + mark-to-market)
-            enriched["pnl"]["mtm_pnl"] = round(mtm_pnl, 2)
-            enriched["pnl"]["total_pnl"] = round(pnl["net_pnl"] + mtm_pnl, 2)
+            enriched["pnl"]["mtm_pnl"] = round(mtm_pnl, 2) if mtm_pnl is not None else None
+            enriched["pnl"]["total_pnl"] = round(pnl["net_pnl"] + mtm_pnl, 2) if mtm_pnl is not None else None
         else:
             enriched["pnl"] = {
                 "notional": 0, "total_fees": 0, "funding_income": 0,
                 "net_pnl": 0, "is_profitable": False, "hours_held": 0,
-                "mtm_pnl": round(mtm_pnl, 2), "total_pnl": round(mtm_pnl, 2),
+                "mtm_pnl": None, "total_pnl": None,
             }
 
         enriched["current_price_long"] = cur_price_long
         enriched["current_price_short"] = cur_price_short
+        enriched["price_health"] = price_health
+        enriched["price_max_age_seconds"] = max_age
+        enriched["prices_available"] = cur_price_long is not None and cur_price_short is not None
         result[p_id] = enriched
 
     return result
